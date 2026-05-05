@@ -1,0 +1,80 @@
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+const DEFAULT_STDLIB_RELATIVE_PATH: &str = "resources/stdlib.full.kir.json";
+const REPO_SENTINELS: [&str; 3] = [
+    "resources/stdlib.full.kir.json",
+    "mappings/l2/pilot_constructs.seed.json",
+    "Cargo.toml",
+];
+
+pub fn default_stdlib_path() -> PathBuf {
+    if let Ok(path) = std::env::var("MERCURIO_STDLIB_PATH") {
+        return PathBuf::from(path);
+    }
+
+    repo_path(DEFAULT_STDLIB_RELATIVE_PATH)
+}
+
+pub fn repo_path(relative: &str) -> PathBuf {
+    repo_root().join(Path::new(relative))
+}
+
+pub fn repo_root() -> PathBuf {
+    static ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+    ROOT.get_or_init(resolve_repo_root).clone()
+}
+
+pub fn default_workspace_root() -> PathBuf {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(repo_root);
+
+    let documents = home.join("Documents");
+    if documents.is_dir() {
+        documents.join("Mercurio")
+    } else {
+        home.join("Mercurio")
+    }
+}
+
+fn resolve_repo_root() -> PathBuf {
+    if let Ok(path) = std::env::var("MERCURIO_REPO_ROOT") {
+        let candidate = PathBuf::from(path);
+        if looks_like_repo_root(&candidate) {
+            return candidate;
+        }
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if let Some(candidate) = find_repo_root(&manifest_dir) {
+        return candidate;
+    }
+
+    if let Ok(current_dir) = std::env::current_dir()
+        && let Some(candidate) = find_repo_root(&current_dir)
+    {
+        return candidate;
+    }
+
+    manifest_dir
+}
+
+fn find_repo_root(start: &Path) -> Option<PathBuf> {
+    for ancestor in start.ancestors() {
+        if looks_like_repo_root(ancestor) {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+
+    None
+}
+
+fn looks_like_repo_root(path: &Path) -> bool {
+    REPO_SENTINELS
+        .iter()
+        .all(|relative| path.join(relative).exists())
+}

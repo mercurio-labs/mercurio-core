@@ -1,0 +1,50 @@
+[package]
+name = "mercurio-tools"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "audit_pilot_corpus"
+path = "src/bin/audit_pilot_corpus.rs"
+
+[[bin]]
+name = "benchmark_examples"
+path = "src/bin/benchmark_examples.rs"
+
+[[bin]]
+name = "compare_kerml_examples"
+path = "src/bin/compare_kerml_examples.rs"
+
+[[bin]]
+name = "compare_pilot_ast"
+path = "src/bin/compare_pilot_ast.rs"
+
+[[bin]]
+name = "compare_pilot_compile_errors"
+path = "src/bin/compare_pilot_compile_errors.rs"
+
+[[bin]]
+name = "compare_pilot_semantics"
+path = "src/bin/compare_pilot_semantics.rs"
+
+[[bin]]
+name = "diagnose_examples"
+path = "src/bin/diagnose_examples.rs"
+
+[[bin]]
+name = "import_pilot_stdlib"
+path = "src/bin/import_pilot_stdlib.rs"
+
+[[bin]]
+name = "inspect_connection"
+path = "src/bin/inspect_connection.rs"
+
+[[bin]]
+name = "runtime_demo"
+path = "src/bin/runtime_demo.rs"
+
+[dependencies]
+mercurio-core = { path = "../mercurio-core" }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+time.workspace = true

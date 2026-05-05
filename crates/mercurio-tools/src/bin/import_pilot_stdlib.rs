@@ -1,0 +1,357 @@
+use std::collections::BTreeMap;
+use std::env;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use mercurio_core::{
+    PilotExportDocument, default_stdlib_path, load_pilot_export, normalize_pilot_export, repo_path,
+    repo_root,
+};
+use serde_json::{Value, json};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = parse_args()?;
+    let input_path = if let Some(pilot_root) = args.pilot_root.as_deref() {
+        export_from_pilot(pilot_root, &args.input_path)?
+    } else {
+        args.input_path.clone()
+    };
+
+    let export = load_pilot_export(&input_path)?;
+    let mut kir = normalize_pilot_export(export.clone())?;
+    kir.metadata = build_kir_metadata(&args, &input_path, &export)?;
+    kir.write_pretty_to_path(&args.output_path)?;
+
+    println!("Imported pilot stdlib export:");
+    println!("  input: {}", input_path.display());
+    println!("  output: {}", args.output_path.display());
+    println!("  elements: {}", kir.elements.len());
+    Ok(())
+}
+
+struct Args {
+    input_path: PathBuf,
+    output_path: PathBuf,
+    pilot_root: Option<PathBuf>,
+}
+
+fn parse_args() -> Result<Args, Box<dyn std::error::Error>> {
+    let mut input_path = repo_path("fixtures/pilot_stdlib_export.json");
+    let mut output_path = default_stdlib_path();
+    let mut pilot_root = None;
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            "--from-export" => {
+                index += 1;
+                let value = args.get(index).ok_or("missing value for --from-export")?;
+                input_path = PathBuf::from(value);
+            }
+            "--out" => {
+                index += 1;
+                let value = args.get(index).ok_or("missing value for --out")?;
+                output_path = PathBuf::from(value);
+            }
+            "--pilot-root" => {
+                index += 1;
+                let value = args.get(index).ok_or("missing value for --pilot-root")?;
+                pilot_root = Some(PathBuf::from(value));
+            }
+            "--help" | "-h" => {
+                print_usage();
+                std::process::exit(0);
+            }
+            unknown => {
+                return Err(format!("unknown argument: {unknown}").into());
+            }
+        }
+        index += 1;
+    }
+
+    Ok(Args {
+        input_path,
+        output_path,
+        pilot_root,
+    })
+}
+
+fn print_usage() {
+    println!(
+        "Usage: cargo run -p mercurio-tools --bin import_pilot_stdlib -- [--pilot-root PATH] [--from-export PATH] [--out PATH]"
+    );
+}
+
+fn build_kir_metadata(
+    args: &Args,
+    input_path: &Path,
+    export: &PilotExportDocument,
+) -> Result<BTreeMap<String, Value>, Box<dyn std::error::Error>> {
+    let mut metadata = BTreeMap::new();
+    metadata.insert(
+        "import_source".to_string(),
+        Value::String("pilot".to_string()),
+    );
+    metadata.insert(
+        "imported_at_utc".to_string(),
+        Value::String(now_utc_rfc3339()?),
+    );
+    metadata.insert(
+        "importer_version".to_string(),
+        Value::String(env!("CARGO_PKG_VERSION").to_string()),
+    );
+    metadata.insert(
+        "input_export_path".to_string(),
+        Value::String(metadata_path_string(input_path)),
+    );
+
+    if let Some(pilot_root) = &args.pilot_root {
+        metadata.insert(
+            "pilot_root".to_string(),
+            Value::String(metadata_path_string(pilot_root)),
+        );
+        metadata.insert(
+            "library_root".to_string(),
+            Value::String(metadata_path_string(&pilot_root.join("sysml.library"))),
+        );
+    }
+
+    if let Some(stdlib_version) = infer_stdlib_version(args, export) {
+        metadata.insert("stdlib_version".to_string(), Value::String(stdlib_version));
+    }
+
+    if let Some(export_metadata) = &export.metadata {
+        metadata.insert("source_export".to_string(), export_metadata.clone());
+    }
+
+    metadata.insert(
+        "element_count".to_string(),
+        json!(kir_element_count(export)),
+    );
+    metadata.insert(
+        "relationship_count".to_string(),
+        json!(export.relationships.len()),
+    );
+
+    Ok(metadata)
+}
+
+fn infer_stdlib_version(args: &Args, export: &PilotExportDocument) -> Option<String> {
+    if let Some(version) = export
+        .metadata
+        .as_ref()
+        .and_then(|value| value.get("pilot_version"))
+        .and_then(Value::as_str)
+    {
+        return Some(version.to_string());
+    }
+
+    args.pilot_root
+        .as_deref()
+        .and_then(|pilot_root| find_interactive_jar(pilot_root).ok())
+        .and_then(|jar| {
+            jar.file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        })
+        .and_then(|file_name| {
+            file_name
+                .strip_prefix("org.omg.sysml.interactive-")
+                .and_then(|name| name.strip_suffix("-all.jar"))
+                .map(str::to_string)
+        })
+}
+
+fn kir_element_count(export: &PilotExportDocument) -> usize {
+    export.elements.len()
+}
+
+fn now_utc_rfc3339() -> Result<String, Box<dyn std::error::Error>> {
+    Ok(OffsetDateTime::now_utc().format(&Rfc3339)?)
+}
+
+fn metadata_path_string(path: &Path) -> String {
+    let repo_root = repo_root();
+    let absolute_path = path
+        .canonicalize()
+        .unwrap_or_else(|_| absolute_path_lossy(path));
+    let absolute_repo_root = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| absolute_path_lossy(&repo_root));
+
+    if let Ok(relative) = absolute_path.strip_prefix(&absolute_repo_root) {
+        return path_to_slash_string(relative);
+    }
+
+    if let Some(parent) = absolute_repo_root.parent() {
+        if let Ok(relative) = absolute_path.strip_prefix(parent) {
+            return format!("../{}", path_to_slash_string(relative));
+        }
+    }
+
+    path_to_slash_string(&absolute_path)
+}
+
+fn absolute_path_lossy(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
+}
+
+fn path_to_slash_string(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn export_from_pilot(
+    pilot_root: &Path,
+    export_path: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let pilot_root = pilot_root.canonicalize()?;
+    let library_root = pilot_root.join("sysml.library");
+    let interactive_jar = find_interactive_jar(&pilot_root)?;
+    let classes_dir = repo_path("target/pilot-exporter-classes");
+    let java_source =
+        repo_path("tools/pilot-exporter/src/main/java/dev/mercurio/pilot/PilotStdlibExporter.java");
+
+    compile_java_exporter(&interactive_jar, &java_source, &classes_dir)?;
+    run_java_exporter(&interactive_jar, &classes_dir, &library_root, export_path)?;
+    Ok(export_path.to_path_buf())
+}
+
+fn find_interactive_jar(pilot_root: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let target_dir = pilot_root.join("org.omg.sysml.interactive/target");
+    let mut jars = std::fs::read_dir(&target_dir)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| {
+                    name.starts_with("org.omg.sysml.interactive-") && name.ends_with("-all.jar")
+                })
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    jars.sort();
+
+    jars.into_iter().last().ok_or_else(|| {
+        format!(
+            "could not find org.omg.sysml.interactive-*-all.jar under {}",
+            target_dir.display()
+        )
+        .into()
+    })
+}
+
+fn compile_java_exporter(
+    interactive_jar: &Path,
+    java_source: &Path,
+    classes_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let class_file = classes_dir.join("dev/mercurio/pilot/PilotStdlibExporter.class");
+    let should_compile = match (
+        std::fs::metadata(java_source),
+        std::fs::metadata(&class_file),
+    ) {
+        (Ok(source), Ok(class)) => source.modified()? > class.modified()?,
+        _ => true,
+    };
+
+    if !should_compile {
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(classes_dir)?;
+    let status = Command::new("javac")
+        .arg("-cp")
+        .arg(interactive_jar)
+        .arg("-d")
+        .arg(classes_dir)
+        .arg(java_source)
+        .status()?;
+
+    if !status.success() {
+        return Err("failed to compile Java pilot exporter".into());
+    }
+
+    Ok(())
+}
+
+fn run_java_exporter(
+    interactive_jar: &Path,
+    classes_dir: &Path,
+    library_root: &Path,
+    export_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = export_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let classes_dir = absolute_path(classes_dir)?;
+    let interactive_jar = absolute_path(interactive_jar)?;
+    let lib_dir = interactive_jar
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("lib")
+        .to_path_buf();
+    let separator = if cfg!(windows) { ";" } else { ":" };
+    let classpath = format!(
+        "{}{}{}{}{}",
+        java_path_string(&classes_dir),
+        separator,
+        java_path_string(&interactive_jar),
+        separator,
+        java_path_string(&lib_dir.join("*"))
+    );
+
+    let status = if cfg!(windows) {
+        let script_path = repo_path("target/run_pilot_exporter.ps1");
+        let script = format!(
+            "$cp = '{}'\njava -cp $cp dev.mercurio.pilot.PilotStdlibExporter '{}' '{}'\n",
+            classpath.replace('\'', "''"),
+            java_path_string(library_root).replace('\'', "''"),
+            java_path_string(export_path).replace('\'', "''"),
+        );
+        std::fs::write(&script_path, script)?;
+        Command::new("powershell")
+            .arg("-File")
+            .arg(script_path)
+            .status()?
+    } else {
+        Command::new("java")
+            .arg("-cp")
+            .arg(classpath)
+            .arg("dev.mercurio.pilot.PilotStdlibExporter")
+            .arg(library_root)
+            .arg(export_path)
+            .status()?
+    };
+
+    if !status.success() {
+        return Err("failed to run Java pilot exporter".into());
+    }
+
+    Ok(())
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+
+    Ok(env::current_dir()?.join(path))
+}
+
+fn java_path_string(path: &Path) -> String {
+    path.display().to_string().replace("\\\\?\\", "")
+}
