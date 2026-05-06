@@ -19,4 +19,5 @@ UI and desktop/web product docs live in the sibling repo at `../../mercurio-ui/d
 - [Server Workspace Plan](SERVER_WORKSPACE_PLAN.md)
 - [SysML Expression Implementation Plan](SYSML_EXPRESSION_IMPLEMENTATION_PLAN.md)
 - [Views Architecture](VIEWS_ARCHITECTURE.md)
+- [Windows Installer Plan](WINDOWS_INSTALLER_PLAN.md)
 - [Proposal API Plan](proposal-api-plan/README.md)
