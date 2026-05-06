@@ -198,6 +198,7 @@ The server package registry is the local abstraction. A backing provider such as
 - [MODEL_EDITOR_MODE.md](MODEL_EDITOR_MODE.md): desktop editor mode
 - [PROJECT_DESCRIPTOR_AND_MOUNT_PLAN.md](PROJECT_DESCRIPTOR_AND_MOUNT_PLAN.md): source/provider/cache separation
 - [VIEWS_ARCHITECTURE.md](VIEWS_ARCHITECTURE.md): semantic projections for tables, diagrams, matrices, dashboards, and future runtime-defined views
+- [DATALOG_REASONING_ENGINE_PLAN.md](DATALOG_REASONING_ENGINE_PLAN.md): derived fact/rule reasoning layer over KIR graph state
 
 ## Guiding Rule
 

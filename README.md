@@ -10,6 +10,7 @@ The goal of this repository is to make the modeling kernel useful on its own: pa
 - Keep the core model semantics independent from any particular server, desktop app, or hosted product.
 - Offer a small public CLI that demonstrates the library without requiring the private product repo.
 - Use KIR as the stable semantic interchange format for graph queries, derived values, package loading, and downstream applications.
+- Optimize for high-performance model loading, compilation, and runtime use, with attention to both wall-clock speed and memory footprint.
 - Keep maintainer-only diagnostics, benchmarks, and Pilot comparison workflows separate from the public CLI.
 
 ## What Lives Here
@@ -40,6 +41,35 @@ Semantic compilation and linting use the bundled default standard library unless
 ### KPAR Packages
 
 A `.kpar` package is a source-backed zip package containing SysML/KerML sources plus package metadata. Mercurio can build these packages from source files and load them later as baseline libraries.
+
+## Performance
+
+Mercurio is designed as a high-performance modeling kernel. The Rust core keeps the default standard library precompiled as KIR, uses bounded semantic caches for warm project workflows, and tracks both load speed and memory use in benchmark runs.
+
+Latest local benchmark, run on May 6, 2026 on Windows with Rust 1.90.0 and OpenJDK 21.0.6:
+
+| Engine | Corpus | Files | Bytes | Full-load result | Warm result | Peak working set |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Mercurio release benchmark | `examples/src/examples` with bundled stdlib | 96 | 229,386 | 11.246s cold workspace load | 76ms unchanged warm scope | 418.3 MiB |
+| Java Pilot direct diagnostics | same 96-file corpus with Pilot stdlib | 96 | 229,386 | 351.926s before resolve/transform failure | n/a | 1,492.1 MiB |
+
+Commands used:
+
+```powershell
+cargo run -q --release -p mercurio-tools --bin benchmark_examples -- --all --root examples/src/examples
+```
+
+The Java comparison used `PilotModelExporter --diagnostics` against the same input file set and the Pilot `sysml.library`. It is not a perfect apples-to-apples semantic comparison because the Java run ended with a Pilot resolve/transform diagnostic failure, but it is useful as a full-load stress reference for wall time and process memory.
+
+For a shared semantic comparison corpus, the largest curated Pilot corpus currently in the repo is `extended`. On the same machine:
+
+| Corpus | Cases | Mercurio total | Java Pilot per-case total | Java Pilot shared setup |
+| --- | ---: | ---: | ---: | ---: |
+| `extended` | 10 | 3.115s | 24.927s | 60.846s |
+
+```powershell
+cargo run -q --release -p mercurio-tools --bin compare_pilot_semantics -- --corpus extended --pilot-root ..\SysML-v2-Pilot-Implementation --out target\pilot_semantic_compare_extended.json
+```
 
 ## Requirements
 
