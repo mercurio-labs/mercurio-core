@@ -1,17 +1,18 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, hash_map::DefaultHasher};
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::Value;
 
 use crate::frontend::ast::{
     AliasDecl, BinaryOp, Declaration, Expr, GenericDefinitionDecl, GenericUsageDecl, ImportDecl,
-    LiteralExpr, PackageDecl, PartDefinitionDecl, PartUsageDecl, QualifiedName, SourceSpan,
-    SysmlModule, UnaryOp,
+    LiteralExpr, MultiplicityRange, PackageDecl, PartDefinitionDecl, PartUsageDecl, QualifiedName,
+    SourceSpan, SysmlModule, UnaryOp,
 };
 use crate::frontend::diagnostics::Diagnostic;
 use crate::frontend::transpile::MappingBundle;
 use crate::ir::KirDocument;
-use crate::logging::log_compile_timed_event;
+use crate::logging::{compile_timer_start, log_compile_timed_event};
 
 #[derive(Debug, Clone)]
 pub struct ResolvedModule {
@@ -64,6 +65,7 @@ pub struct ResolvedUsage {
     pub type_ref: Option<String>,
     pub additional_type_refs: Vec<String>,
     pub reference_target: Option<String>,
+    pub multiplicity: Option<MultiplicityRange>,
     pub expression: Option<ResolvedExpr>,
     pub is_derived: bool,
     pub specializes: Vec<String>,
@@ -154,6 +156,7 @@ struct CollectedUsage {
     ty: Option<QualifiedName>,
     additional_types: Vec<QualifiedName>,
     reference_target: Option<QualifiedName>,
+    multiplicity: Option<MultiplicityRange>,
     expression: Option<Expr>,
     specializes: Vec<QualifiedName>,
     subsets: Vec<QualifiedName>,
@@ -208,7 +211,7 @@ impl ResolverContext {
         stdlib: &KirDocument,
         mappings: &MappingBundle,
     ) -> Result<Self, Diagnostic> {
-        let collect_context_start = std::time::Instant::now();
+        let collect_context_start = compile_timer_start();
         let (packages, _, definitions, usages, _) = collect_modules(context_modules, mappings)?;
         log_compile_timed_event(
             "resolver.collect_context_modules",
@@ -223,7 +226,7 @@ impl ResolverContext {
             ),
         );
 
-        let local_index_start = std::time::Instant::now();
+        let local_index_start = compile_timer_start();
         let local_definitions = build_local_definition_map(&definitions)?;
         let definition_index = definitions
             .iter()
@@ -239,7 +242,7 @@ impl ResolverContext {
             format!("definitions={} usages={}", definitions.len(), usages.len()),
         );
 
-        let stdlib_index_start = std::time::Instant::now();
+        let stdlib_index_start = compile_timer_start();
         let stdlib_indexes = cached_stdlib_indexes(stdlib, mappings);
         log_compile_timed_event(
             "resolver.build_stdlib_indexes",
@@ -349,7 +352,7 @@ fn resolve_module_with_policy_context(
     mappings: &MappingBundle,
     policy: ResolvePolicy,
 ) -> Result<ResolvedModule, Diagnostic> {
-    let collect_module_start = std::time::Instant::now();
+    let collect_module_start = compile_timer_start();
     let (packages, imports, definitions, usages, aliases) = collect_module(module, mappings)?;
     log_compile_timed_event(
         "resolver.collect_module",
@@ -367,7 +370,7 @@ fn resolve_module_with_policy_context(
 
     let local_aliases = build_local_alias_map(&aliases);
 
-    let resolve_import_start = std::time::Instant::now();
+    let resolve_import_start = compile_timer_start();
     let resolved_imports = resolve_imports(
         &imports,
         &context.stdlib_indexes.ids,
@@ -382,7 +385,7 @@ fn resolve_module_with_policy_context(
         format!("imports={}", resolved_imports.len()),
     );
 
-    let import_alias_start = std::time::Instant::now();
+    let import_alias_start = compile_timer_start();
     let import_aliases = build_import_alias_map(
         &resolved_imports,
         &context.packages,
@@ -405,7 +408,7 @@ fn resolve_module_with_policy_context(
         ),
     );
 
-    let resolve_definition_start = std::time::Instant::now();
+    let resolve_definition_start = compile_timer_start();
     let resolved_definitions = definitions
         .into_iter()
         .map(|definition| {
@@ -431,7 +434,7 @@ fn resolve_module_with_policy_context(
         format!("definitions={}", resolved_definitions.len()),
     );
 
-    let resolve_usage_start = std::time::Instant::now();
+    let resolve_usage_start = compile_timer_start();
     let resolved_usages = usages
         .into_iter()
         .map(|usage| {
@@ -899,6 +902,7 @@ fn collect_part_usage(
         ty: usage.ty.clone(),
         additional_types: usage.additional_types.clone(),
         reference_target: None,
+        multiplicity: usage.multiplicity.clone(),
         expression: usage.expression.clone(),
         specializes: usage.specializes.clone(),
         subsets: usage.subsets.clone(),
@@ -947,6 +951,7 @@ fn collect_generic_usage(
         ty: usage.ty.clone(),
         additional_types: usage.additional_types.clone(),
         reference_target: usage.reference_target.clone(),
+        multiplicity: usage.multiplicity.clone(),
         expression: usage.expression.clone(),
         specializes: usage.specializes.clone(),
         subsets: usage.subsets.clone(),
@@ -1105,7 +1110,8 @@ fn build_stdlib_feature_index(stdlib: &KirDocument) -> BTreeMap<String, BTreeMap
 }
 
 fn cached_stdlib_indexes(stdlib: &KirDocument, mappings: &MappingBundle) -> Arc<StdlibIndexes> {
-    static CACHE: OnceLock<Mutex<BTreeMap<(usize, usize), Arc<StdlibIndexes>>>> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<BTreeMap<(usize, usize, u64), Arc<StdlibIndexes>>>> =
+        OnceLock::new();
 
     let key = stdlib_instance_key(stdlib);
     let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
@@ -1134,8 +1140,16 @@ fn cached_stdlib_indexes(stdlib: &KirDocument, mappings: &MappingBundle) -> Arc<
     guard.entry(key).or_insert_with(|| indexes.clone()).clone()
 }
 
-fn stdlib_instance_key(stdlib: &KirDocument) -> (usize, usize) {
-    (stdlib.elements.as_ptr() as usize, stdlib.elements.len())
+fn stdlib_instance_key(stdlib: &KirDocument) -> (usize, usize, u64) {
+    let mut hasher = DefaultHasher::new();
+    for element in &stdlib.elements {
+        element.id.hash(&mut hasher);
+    }
+    (
+        stdlib.elements.as_ptr() as usize,
+        stdlib.elements.len(),
+        hasher.finish(),
+    )
 }
 
 fn collect_stdlib_owner_features(
@@ -1810,6 +1824,7 @@ fn resolve_usage(
         type_ref,
         additional_type_refs,
         reference_target,
+        multiplicity: usage.multiplicity,
         expression,
         is_derived: usage.modifiers.iter().any(|modifier| modifier == "derived")
             || (usage.expression.is_some() && effective_redefines.is_empty()),
@@ -3939,7 +3954,7 @@ fn resolve_type_reference_in_scope(
 ) -> Option<String> {
     resolve_scoped_local_type_reference(name, owner_qualified_name, local_definitions).or_else(
         || {
-            resolve_type_reference(
+            resolve_visible_type_reference(
                 name,
                 stdlib_ids,
                 stdlib_aliases,
@@ -3949,6 +3964,70 @@ fn resolve_type_reference_in_scope(
             )
         },
     )
+}
+
+fn resolve_visible_type_reference(
+    name: &QualifiedName,
+    stdlib_ids: &[String],
+    stdlib_aliases: &BTreeMap<String, String>,
+    local_definitions: &BTreeMap<String, String>,
+    local_aliases: &BTreeMap<String, QualifiedName>,
+    import_aliases: &ImportAliases,
+) -> Option<String> {
+    if name.segments.len() == 1 {
+        let simple = &name.segments[0];
+        if let Some(alias_target) = local_aliases.get(simple) {
+            return resolve_visible_type_reference(
+                alias_target,
+                stdlib_ids,
+                stdlib_aliases,
+                local_definitions,
+                local_aliases,
+                import_aliases,
+            );
+        }
+        if let Some(imported) = import_aliases.value_aliases.get(simple) {
+            return Some(imported.clone());
+        }
+        if let Some(alias) = stdlib_aliases.get(simple) {
+            return Some(alias.clone());
+        }
+        return unique_suffix_match(simple, stdlib_ids);
+    }
+
+    if let Some(expanded) = expand_import_namespace_prefix(name, local_aliases, import_aliases) {
+        return resolve_visible_type_reference(
+            &expanded,
+            stdlib_ids,
+            stdlib_aliases,
+            local_definitions,
+            local_aliases,
+            import_aliases,
+        );
+    }
+
+    if let Some(imported) = import_aliases.value_aliases.get(&name.as_dot_string()) {
+        return Some(imported.clone());
+    }
+
+    resolve_explicit_type_reference(name, stdlib_ids, stdlib_aliases, local_definitions)
+}
+
+fn resolve_explicit_type_reference(
+    name: &QualifiedName,
+    stdlib_ids: &[String],
+    stdlib_aliases: &BTreeMap<String, String>,
+    local_definitions: &BTreeMap<String, String>,
+) -> Option<String> {
+    let colon = name.as_colon_string();
+    if let Some(alias) = stdlib_aliases.get(&colon) {
+        return Some(alias.clone());
+    }
+    if stdlib_ids.iter().any(|id| id == &colon) {
+        return Some(colon);
+    }
+
+    local_definitions.get(&name.as_dot_string()).cloned()
 }
 
 fn resolve_scoped_local_type_reference(
@@ -4091,7 +4170,29 @@ fn build_stdlib_alias_map(
         aliases.entry(short_name).or_insert(target);
     }
 
+    add_compat_stdlib_alias(&mut aliases, stdlib, "Items::Item", "sysml.Item");
+    add_compat_stdlib_alias(&mut aliases, stdlib, "Base::DataValue", "sysml.DataValue");
+    add_compat_stdlib_alias(&mut aliases, stdlib, "Parts::Part", "sysml.Part");
+    add_compat_stdlib_alias(&mut aliases, stdlib, "Ports::Port", "sysml.Port");
+    add_compat_stdlib_alias(
+        &mut aliases,
+        stdlib,
+        "Interfaces::Interface",
+        "sysml.Interface",
+    );
+
     aliases
+}
+
+fn add_compat_stdlib_alias(
+    aliases: &mut BTreeMap<String, String>,
+    stdlib: &KirDocument,
+    alias: &str,
+    target: &str,
+) {
+    if stdlib.elements.iter().any(|element| element.id == target) {
+        aliases.entry(alias.to_string()).or_insert(target.to_string());
+    }
 }
 
 fn unique_suffix_match(name: &str, stdlib_ids: &[String]) -> Option<String> {

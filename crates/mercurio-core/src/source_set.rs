@@ -10,6 +10,7 @@ use crate::frontend::sysml::{
     compile_sysml_module_with_resolver_context, compile_sysml_text_with_context, parse_sysml,
 };
 use crate::frontend::transpile::MappingBundle;
+use crate::logging::compile_timer_start;
 use crate::ir::{KirDocument, KirError};
 use crate::logging::log_compile_timed_event;
 
@@ -48,7 +49,7 @@ impl SourceDocument {
     pub fn new(path: impl Into<String>, content: impl Into<String>) -> Self {
         let path = path.into();
         let content = content.into();
-        let parse_start = std::time::Instant::now();
+        let parse_start = compile_timer_start();
         let module_result = parse_source_module(&path, &content);
         log_compile_timed_event(
             "source_set.parse_source_module",

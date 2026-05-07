@@ -11,7 +11,7 @@ use crate::frontend::resolver::{
 };
 use crate::frontend::transpile::{MappingBundle, transpile_module_with_source};
 use crate::ir::KirDocument;
-use crate::logging::log_compile_timed_event;
+use crate::logging::{compile_timer_start, log_compile_timed_event};
 use crate::paths::default_stdlib_path;
 
 #[derive(Debug)]
@@ -69,7 +69,7 @@ pub fn compile_kerml_text(
     source_name: &str,
     stdlib: &KirDocument,
 ) -> Result<KirDocument, Diagnostic> {
-    let parse_start = std::time::Instant::now();
+    let parse_start = compile_timer_start();
     let module = parse_kerml(input)?;
     log_compile_timed_event(
         "kerml.compile.parse",
@@ -86,7 +86,7 @@ pub fn compile_kerml_text_with_context(
     context_modules: &[SysmlModule],
     stdlib: &KirDocument,
 ) -> Result<KirDocument, Diagnostic> {
-    let parse_start = std::time::Instant::now();
+    let parse_start = compile_timer_start();
     let module = parse_kerml(input)?;
     log_compile_timed_event(
         "kerml.compile.parse",
@@ -102,7 +102,7 @@ pub fn compile_kerml_module(
     source_name: &str,
     stdlib: &KirDocument,
 ) -> Result<KirDocument, Diagnostic> {
-    let mapping_start = std::time::Instant::now();
+    let mapping_start = compile_timer_start();
     let mappings = MappingBundle::load()?;
     log_compile_timed_event(
         "kerml.compile.mapping_load",
@@ -111,7 +111,7 @@ pub fn compile_kerml_module(
         format!("source={}", source_name),
     );
 
-    let resolve_start = std::time::Instant::now();
+    let resolve_start = compile_timer_start();
     let resolved =
         resolve_kerml_module_with_context(module, std::slice::from_ref(module), stdlib, mappings)?;
     log_compile_timed_event(
@@ -121,7 +121,7 @@ pub fn compile_kerml_module(
         format!("source={} context_modules=1", source_name),
     );
 
-    let transpile_start = std::time::Instant::now();
+    let transpile_start = compile_timer_start();
     let document = transpile_module_with_source(&resolved, source_name, "kerml", mappings)?;
     log_compile_timed_event(
         "kerml.compile.transpile",
@@ -142,7 +142,7 @@ pub fn compile_kerml_module_with_context(
     context_modules: &[SysmlModule],
     stdlib: &KirDocument,
 ) -> Result<KirDocument, Diagnostic> {
-    let mapping_start = std::time::Instant::now();
+    let mapping_start = compile_timer_start();
     let mappings = MappingBundle::load()?;
     log_compile_timed_event(
         "kerml.compile.mapping_load",
@@ -151,7 +151,7 @@ pub fn compile_kerml_module_with_context(
         format!("source={}", source_name),
     );
 
-    let resolve_start = std::time::Instant::now();
+    let resolve_start = compile_timer_start();
     let resolved = resolve_kerml_module_with_context(module, context_modules, stdlib, mappings)?;
     log_compile_timed_event(
         "kerml.compile.resolve",
@@ -164,7 +164,7 @@ pub fn compile_kerml_module_with_context(
         ),
     );
 
-    let transpile_start = std::time::Instant::now();
+    let transpile_start = compile_timer_start();
     let document = transpile_module_with_source(&resolved, source_name, "kerml", mappings)?;
     log_compile_timed_event(
         "kerml.compile.transpile",
@@ -185,7 +185,7 @@ pub fn compile_kerml_module_with_resolver_context(
     resolver_context: &ResolverContext,
     mappings: &MappingBundle,
 ) -> Result<KirDocument, Diagnostic> {
-    let resolve_start = std::time::Instant::now();
+    let resolve_start = compile_timer_start();
     let resolved = resolve_kerml_module_with_resolver_context(module, resolver_context, mappings)?;
     log_compile_timed_event(
         "kerml.compile.resolve",
@@ -198,7 +198,7 @@ pub fn compile_kerml_module_with_resolver_context(
         ),
     );
 
-    let transpile_start = std::time::Instant::now();
+    let transpile_start = compile_timer_start();
     let document = transpile_module_with_source(&resolved, source_name, "kerml", mappings)?;
     log_compile_timed_event(
         "kerml.compile.transpile",
@@ -552,6 +552,7 @@ impl Parser {
             is_implicit_name: false,
             ty,
             reference_target: None,
+            multiplicity: None,
             expression: None,
             additional_types,
             specializes: relations.specializes,
@@ -642,6 +643,7 @@ impl Parser {
             is_implicit_name: false,
             ty,
             reference_target: None,
+            multiplicity: None,
             expression: None,
             additional_types,
             specializes: relations.specializes,
@@ -691,6 +693,7 @@ impl Parser {
             is_implicit_name: false,
             ty: None,
             reference_target: None,
+            multiplicity: None,
             expression: None,
             additional_types: Vec::new(),
             specializes: Vec::new(),

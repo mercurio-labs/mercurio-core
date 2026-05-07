@@ -3,6 +3,7 @@ members = [
     "crates/mercurio-core",
     "crates/mercurio-cli",
     "crates/mercurio-tools",
+    "crates/mercurio-wasm",
 ]
 resolver = "2"
 
@@ -17,4 +18,7 @@ reqwest = { version = "0.13", features = ["blocking", "json"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 time = { version = "0.3", features = ["formatting"] }
-zip = "0.6"
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+console_error_panic_hook = "0.1"
+zip = { version = "0.6", default-features = false, features = ["deflate"] }

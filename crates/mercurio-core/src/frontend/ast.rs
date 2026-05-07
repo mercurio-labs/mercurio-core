@@ -96,10 +96,19 @@ pub struct ImportDecl {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MultiplicityRange {
+    pub lower: String,
+    pub upper: String,
+    pub raw: String,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartUsageDecl {
     pub name: String,
     pub is_implicit_name: bool,
     pub ty: Option<QualifiedName>,
+    pub multiplicity: Option<MultiplicityRange>,
     pub expression: Option<Expr>,
     pub additional_types: Vec<QualifiedName>,
     pub specializes: Vec<QualifiedName>,
@@ -140,6 +149,7 @@ pub struct GenericUsageDecl {
     pub is_implicit_name: bool,
     pub ty: Option<QualifiedName>,
     pub reference_target: Option<QualifiedName>,
+    pub multiplicity: Option<MultiplicityRange>,
     pub expression: Option<Expr>,
     pub additional_types: Vec<QualifiedName>,
     pub specializes: Vec<QualifiedName>,

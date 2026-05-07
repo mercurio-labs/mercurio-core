@@ -1,3 +1,4 @@
+#[cfg(feature = "ai")]
 pub mod ai;
 pub mod assessment;
 pub mod authoring;
@@ -19,6 +20,7 @@ pub mod source_set;
 pub mod syntax_compare;
 pub mod views;
 
+#[cfg(feature = "ai")]
 pub use ai::{
     AskMercurioArtifact, AskMercurioCitation, AskMercurioProjectContext, AskMercurioRequest,
     AskMercurioResponse, AskMercurioTask, ChatCompletionRequest, ChatCompletionResponse,

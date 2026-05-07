@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::graph::Graph;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::paths::default_stdlib_rulepack_path;
 
 pub const CORE_RULEPACK_ID: &str = "mercurio.core";
@@ -319,12 +320,22 @@ impl RulePack {
 }
 
 pub fn load_default_rulepacks() -> Result<Vec<RulePack>, DatalogError> {
-    let path = default_stdlib_rulepack_path();
-    if !path.exists() {
-        return Ok(Vec::new());
+    #[cfg(target_arch = "wasm32")]
+    {
+        return Ok(vec![RulePack::from_str(include_str!(
+            "../../../resources/stdlib.rulepack.json"
+        ))?]);
     }
 
-    Ok(vec![RulePack::from_path(&path)?])
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let path = default_stdlib_rulepack_path();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+
+        Ok(vec![RulePack::from_path(&path)?])
+    }
 }
 
 impl Fact {

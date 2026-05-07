@@ -1,0 +1,17 @@
+[package]
+name = "mercurio-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+console_error_panic_hook.workspace = true
+mercurio-core = { path = "../mercurio-core", default-features = false }
+serde = { workspace = true }
+serde_json.workspace = true
+serde-wasm-bindgen.workspace = true
+wasm-bindgen.workspace = true
+

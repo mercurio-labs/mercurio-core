@@ -11,6 +11,7 @@ use crate::frontend::resolver::{
     ResolvedPathSegment, ResolvedUsage,
 };
 use crate::ir::{KirDocument, KirElement};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::paths::repo_path;
 
 #[derive(Debug, Deserialize)]
@@ -124,18 +125,14 @@ impl MappingBundle {
     }
 
     fn load_uncached() -> Result<Self, Diagnostic> {
-        let construct_seed: PilotConstructSeed = serde_json::from_str(
-            &std::fs::read_to_string(repo_path("mappings/l2/pilot_constructs.seed.json")).map_err(
-                |err| Diagnostic::new(format!("failed to read mapping file: {err}"), None),
-            )?,
-        )
-        .map_err(|err| Diagnostic::new(format!("failed to parse mapping file: {err}"), None))?;
-        let kir_emission: KirEmissionSeed = serde_json::from_str(
-            &std::fs::read_to_string(repo_path("mappings/l2/kir_emission.seed.json")).map_err(
-                |err| Diagnostic::new(format!("failed to read emission file: {err}"), None),
-            )?,
-        )
-        .map_err(|err| Diagnostic::new(format!("failed to parse emission file: {err}"), None))?;
+        let construct_seed: PilotConstructSeed =
+            serde_json::from_str(&load_pilot_constructs_seed()?).map_err(|err| {
+                Diagnostic::new(format!("failed to parse mapping file: {err}"), None)
+            })?;
+        let kir_emission: KirEmissionSeed = serde_json::from_str(&load_kir_emission_seed()?)
+            .map_err(|err| {
+                Diagnostic::new(format!("failed to parse emission file: {err}"), None)
+            })?;
 
         Ok(Self {
             package_default_specializations: construct_seed
@@ -284,6 +281,28 @@ impl MappingBundle {
     pub fn stdlib_aliases(&self) -> &HashMap<String, String> {
         &self.stdlib_aliases
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn load_pilot_constructs_seed() -> Result<String, Diagnostic> {
+    Ok(include_str!("../../../../mappings/l2/pilot_constructs.seed.json").to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn load_pilot_constructs_seed() -> Result<String, Diagnostic> {
+    std::fs::read_to_string(repo_path("mappings/l2/pilot_constructs.seed.json"))
+        .map_err(|err| Diagnostic::new(format!("failed to read mapping file: {err}"), None))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn load_kir_emission_seed() -> Result<String, Diagnostic> {
+    Ok(include_str!("../../../../mappings/l2/kir_emission.seed.json").to_string())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn load_kir_emission_seed() -> Result<String, Diagnostic> {
+    std::fs::read_to_string(repo_path("mappings/l2/kir_emission.seed.json"))
+        .map_err(|err| Diagnostic::new(format!("failed to read emission file: {err}"), None))
 }
 
 fn pascal_case(value: &str) -> String {
@@ -837,6 +856,30 @@ fn transpile_usage(
         ("is_ordered".to_string(), Value::Bool(false)),
         ("is_unique".to_string(), Value::Bool(true)),
         (
+            "multiplicity".to_string(),
+            usage
+                .multiplicity
+                .as_ref()
+                .map(|multiplicity| Value::String(multiplicity.raw.clone()))
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "multiplicity_lower".to_string(),
+            usage
+                .multiplicity
+                .as_ref()
+                .map(|multiplicity| Value::String(multiplicity.lower.clone()))
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "multiplicity_upper".to_string(),
+            usage
+                .multiplicity
+                .as_ref()
+                .map(|multiplicity| Value::String(multiplicity.upper.clone()))
+                .unwrap_or(Value::Null),
+        ),
+        (
             "is_variable".to_string(),
             Value::Bool(usage_is_variable(usage)),
         ),
@@ -858,6 +901,20 @@ fn transpile_usage(
         element.properties.insert(
             "expression_ir".to_string(),
             render_expression_ir(expression)?,
+        );
+    }
+    if let Some(multiplicity) = &usage.multiplicity {
+        element.properties.insert(
+            "multiplicity".to_string(),
+            Value::String(multiplicity.raw.clone()),
+        );
+        element.properties.insert(
+            "multiplicity_lower".to_string(),
+            Value::String(multiplicity.lower.clone()),
+        );
+        element.properties.insert(
+            "multiplicity_upper".to_string(),
+            Value::String(multiplicity.upper.clone()),
         );
     }
     if let Some(reference_semantics) = &reference_semantics {

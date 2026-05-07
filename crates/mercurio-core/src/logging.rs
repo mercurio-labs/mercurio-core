@@ -7,6 +7,20 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 static LOG_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(not(target_arch = "wasm32"))]
+pub type CompileTimer = Instant;
+
+#[cfg(target_arch = "wasm32")]
+pub type CompileTimer = ();
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn compile_timer_start() -> CompileTimer {
+    Instant::now()
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn compile_timer_start() -> CompileTimer {}
+
 pub fn log_runtime_event(message: impl AsRef<str>) {
     let timestamp_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -47,11 +61,22 @@ pub fn log_timed_event(operation: &str, start: Instant, outcome: &str, details: 
 
 pub fn log_compile_timed_event(
     operation: &str,
-    start: Instant,
+    start: CompileTimer,
     outcome: &str,
     details: impl AsRef<str>,
 ) {
     if compile_trace_enabled() {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = start;
+            log_runtime_event(format!(
+                "{} {} {}",
+                operation,
+                outcome,
+                details.as_ref()
+            ));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         log_timed_event(operation, start, outcome, details);
     }
 }

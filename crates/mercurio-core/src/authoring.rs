@@ -4,7 +4,9 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::frontend::ast::{Declaration as AstDeclaration, PackageDecl, SourceSpan, SysmlModule};
+use crate::frontend::ast::{
+    Declaration as AstDeclaration, MultiplicityRange, PackageDecl, SourceSpan, SysmlModule,
+};
 use crate::frontend::diagnostics::Diagnostic;
 use crate::frontend::sysml::{compile_sysml_text, parse_sysml};
 use crate::ir::{KirDocument, KirElement, KirError};
@@ -61,6 +63,7 @@ pub struct Usage {
     pub is_implicit_name: bool,
     pub ty: Option<QualifiedName>,
     pub reference_target: Option<QualifiedName>,
+    pub multiplicity: Option<MultiplicityRange>,
     pub additional_types: Vec<QualifiedName>,
     pub specializes: Vec<QualifiedName>,
     pub subsets: Vec<QualifiedName>,
@@ -716,6 +719,7 @@ impl AuthoringProject {
                     is_implicit_name: false,
                     ty,
                     reference_target: None,
+                    multiplicity: None,
                     additional_types: Vec::new(),
                     specializes,
                     subsets: Vec::new(),
@@ -1640,6 +1644,11 @@ impl Usage {
             }
             header.push_str(&ty.as_colon_string());
         }
+        if let Some(multiplicity) = &self.multiplicity {
+            header.push('[');
+            header.push_str(&multiplicity.raw);
+            header.push(']');
+        }
         if !self.additional_types.is_empty() {
             header.push_str(" :> ");
             header.push_str(
@@ -1757,6 +1766,7 @@ impl Declaration {
                     .as_ref()
                     .map(|ty| QualifiedName(ty.segments.clone())),
                 reference_target: None,
+                multiplicity: usage.multiplicity.clone(),
                 additional_types: usage
                     .additional_types
                     .iter()
@@ -1813,6 +1823,7 @@ impl Declaration {
                     .reference_target
                     .as_ref()
                     .map(|target| QualifiedName(target.segments.clone())),
+                multiplicity: usage.multiplicity.clone(),
                 additional_types: usage
                     .additional_types
                     .iter()
@@ -2440,6 +2451,14 @@ fn semantic_attributes_for_declaration(declaration: &Declaration) -> Vec<Semanti
                     .as_ref()
                     .map(|value| Value::String(value.as_colon_string())),
             },
+            semantic_scalar_attribute(
+                "multiplicity",
+                usage
+                    .multiplicity
+                    .as_ref()
+                    .map(|multiplicity| Value::String(multiplicity.raw.clone())),
+                usage.multiplicity.is_some(),
+            ),
             semantic_list_attribute("specializes", &usage.specializes),
             semantic_scalar_attribute(
                 "is_abstract",
@@ -2538,6 +2557,24 @@ fn semantic_list_attribute(name: &str, values: &[QualifiedName]) -> SemanticAttr
                 .map(|value| Value::String(value.as_colon_string()))
                 .collect(),
         )),
+    }
+}
+
+fn multiplicity_range_from_raw(raw: &str) -> MultiplicityRange {
+    let (lower, upper) = raw
+        .split_once("..")
+        .map(|(lower, upper)| (lower.to_string(), upper.to_string()))
+        .unwrap_or_else(|| (raw.to_string(), raw.to_string()));
+    MultiplicityRange {
+        lower,
+        upper,
+        raw: raw.to_string(),
+        span: SourceSpan {
+            start_line: 0,
+            start_col: 0,
+            end_line: 0,
+            end_col: 0,
+        },
     }
 }
 
@@ -3439,6 +3476,11 @@ fn build_declaration_from_kir(
             is_implicit_name: element.properties.get("declared_name").is_none(),
             ty: ty.clone(),
             reference_target: None,
+            multiplicity: element
+                .properties
+                .get("multiplicity")
+                .and_then(Value::as_str)
+                .map(multiplicity_range_from_raw),
             additional_types: Vec::new(),
             specializes: specializations_from_properties(&element.properties, ty.as_ref()),
             subsets: property_qnames(&element.properties, "subsetted_features"),

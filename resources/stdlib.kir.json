@@ -90,6 +90,27 @@
       }
     },
     {
+      "id": "sysml.DataValue",
+      "kind": "kerml.DataType",
+      "layer": 1,
+      "properties": {
+        "doc": {
+          "blocks": [
+            {
+              "kind": "comment",
+              "text": "DataValue is the general base type for value-like attributes in the minimal browser standard library."
+            }
+          ],
+          "source": "minimal"
+        },
+        "pilot_library_group": "Kernel Libraries",
+        "source_file": "Kernel Libraries/Kernel Semantic Library/Base.kerml",
+        "specializes": [
+          "kerml.Anything"
+        ]
+      }
+    },
+    {
       "id": "sysml.ItemDefinition",
       "kind": "sysml.MetadataDefinition",
       "layer": 1,
@@ -143,6 +164,72 @@
         },
         "specializes": [
           "sysml.ItemDefinition"
+        ]
+      }
+    },
+    {
+      "id": "sysml.Port",
+      "kind": "sysml.PortDefinition",
+      "layer": 1,
+      "properties": {
+        "doc": {
+          "blocks": [
+            {
+              "kind": "comment",
+              "text": "Port is the most general class of connection points for interacting with a Part."
+            }
+          ],
+          "source": "minimal"
+        },
+        "pilot_library_group": "Systems Library",
+        "source_file": "Systems Library/Ports.sysml",
+        "specializes": [
+          "sysml.Part"
+        ]
+      }
+    },
+    {
+      "id": "sysml.PortDefinition",
+      "kind": "sysml.MetadataDefinition",
+      "layer": 1,
+      "properties": {
+        "pilot_library_group": "Systems Library",
+        "source_file": "Systems Library/SysML.sysml",
+        "specializes": [
+          "sysml.PartDefinition"
+        ]
+      }
+    },
+    {
+      "id": "sysml.Interface",
+      "kind": "sysml.InterfaceDefinition",
+      "layer": 1,
+      "properties": {
+        "doc": {
+          "blocks": [
+            {
+              "kind": "comment",
+              "text": "Interface is the most general class of links between Ports on Parts."
+            }
+          ],
+          "source": "minimal"
+        },
+        "pilot_library_group": "Systems Library",
+        "source_file": "Systems Library/Interfaces.sysml",
+        "specializes": [
+          "kerml.Anything"
+        ]
+      }
+    },
+    {
+      "id": "sysml.InterfaceDefinition",
+      "kind": "sysml.MetadataDefinition",
+      "layer": 1,
+      "properties": {
+        "pilot_library_group": "Systems Library",
+        "source_file": "Systems Library/SysML.sysml",
+        "specializes": [
+          "kerml.Type"
         ]
       }
     }

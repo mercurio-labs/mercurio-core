@@ -207,12 +207,99 @@ fn collect_declaration_assessment_facts(
             Declaration::PartDefinition(definition) => {
                 let id = scoped_id(owner, &definition.name);
                 facts.push(Fact::new("part_definition", [id.clone()]));
-                facts.push(Fact::new("name", [id, definition.name.clone()]));
+                facts.push(Fact::new("name", [id.clone(), definition.name.clone()]));
+                if let Some(owner) = owner {
+                    facts.push(Fact::new("owns", [owner.to_string(), id.clone()]));
+                }
+                collect_declaration_assessment_facts(&definition.members, Some(&id), facts);
             }
             Declaration::PartUsage(usage) => {
                 let id = scoped_id(owner, &usage.name);
                 facts.push(Fact::new("part_usage", [id.clone()]));
-                facts.push(Fact::new("name", [id, usage.name.clone()]));
+                facts.push(Fact::new("name", [id.clone(), usage.name.clone()]));
+                if let Some(owner) = owner {
+                    facts.push(Fact::new("owns", [owner.to_string(), id.clone()]));
+                }
+                if let Some(ty) = &usage.ty {
+                    facts.push(Fact::new("type", [id.clone(), ty.as_colon_string()]));
+                }
+                if let Some(multiplicity) = &usage.multiplicity {
+                    facts.push(Fact::new(
+                        "multiplicity",
+                        [id.clone(), multiplicity.raw.clone()],
+                    ));
+                    facts.push(Fact::new(
+                        "multiplicity_lower",
+                        [id.clone(), multiplicity.lower.clone()],
+                    ));
+                    facts.push(Fact::new(
+                        "multiplicity_upper",
+                        [id.clone(), multiplicity.upper.clone()],
+                    ));
+                }
+                collect_declaration_assessment_facts(&usage.body_members, Some(&id), facts);
+            }
+            Declaration::GenericUsage(usage) => {
+                let id = scoped_id(owner, &usage.name);
+                facts.push(Fact::new("usage", [id.clone()]));
+                facts.push(Fact::new("usage_keyword", [id.clone(), usage.keyword.clone()]));
+                for modifier in &usage.modifiers {
+                    facts.push(Fact::new("modifier", [id.clone(), modifier.clone()]));
+                }
+                if matches!(usage.keyword.as_str(), "connect" | "connection" | "interface") {
+                    facts.push(Fact::new("connection_usage", [id.clone()]));
+                }
+                if usage.keyword == "interface" {
+                    facts.push(Fact::new("interface_usage", [id.clone()]));
+                }
+                facts.push(Fact::new("name", [id.clone(), usage.name.clone()]));
+                if let Some(owner) = owner {
+                    facts.push(Fact::new("owns", [owner.to_string(), id.clone()]));
+                }
+                if let Some(ty) = &usage.ty {
+                    facts.push(Fact::new("type", [id.clone(), ty.as_colon_string()]));
+                }
+                if let Some(reference_target) = &usage.reference_target {
+                    let target = reference_target.as_colon_string();
+                    facts.push(Fact::new("reference_target", [id.clone(), target.clone()]));
+                    if let Some(owner) = owner {
+                        if usage.modifiers.iter().any(|modifier| modifier == "end-source") {
+                            facts.push(Fact::new(
+                                "connected_source",
+                                [owner.to_string(), target.clone()],
+                            ));
+                            facts.push(Fact::new(
+                                "connected_endpoint",
+                                [owner.to_string(), "source".to_string(), target.clone()],
+                            ));
+                        }
+                        if usage.modifiers.iter().any(|modifier| modifier == "end-target") {
+                            facts.push(Fact::new(
+                                "connected_target",
+                                [owner.to_string(), target.clone()],
+                            ));
+                            facts.push(Fact::new(
+                                "connected_endpoint",
+                                [owner.to_string(), "target".to_string(), target],
+                            ));
+                        }
+                    }
+                }
+                if let Some(multiplicity) = &usage.multiplicity {
+                    facts.push(Fact::new(
+                        "multiplicity",
+                        [id.clone(), multiplicity.raw.clone()],
+                    ));
+                    facts.push(Fact::new(
+                        "multiplicity_lower",
+                        [id.clone(), multiplicity.lower.clone()],
+                    ));
+                    facts.push(Fact::new(
+                        "multiplicity_upper",
+                        [id.clone(), multiplicity.upper.clone()],
+                    ));
+                }
+                collect_declaration_assessment_facts(&usage.body_members, Some(&id), facts);
             }
             _ => {}
         }
@@ -379,5 +466,59 @@ mod tests {
         assert_eq!(report.status, AssessmentStatus::Pass);
         assert_eq!(report.assertions[0].binding_count, 2);
         assert_eq!(report.assertions[1].binding_count, 1);
+    }
+
+    #[test]
+    fn emits_part_usage_type_and_multiplicity_facts() {
+        let parse_report = parse_sysml_recovering(
+            "package UavParts { part def RotorAssembly; part def UavSystem { part rotors: RotorAssembly[6]; } }",
+        )
+        .unwrap();
+        let facts = sysml_module_assessment_facts(&parse_report.module);
+        let evaluation = evaluate(facts, &[]).unwrap();
+        let usage_id = "UavParts::UavSystem::rotors";
+
+        assert!(evaluation.contains("part_usage", &[usage_id]));
+        assert!(evaluation.contains("name", &[usage_id, "rotors"]));
+        assert!(evaluation.contains("type", &[usage_id, "RotorAssembly"]));
+        assert!(evaluation.contains("multiplicity", &[usage_id, "6"]));
+        assert!(evaluation.contains("multiplicity_lower", &[usage_id, "6"]));
+        assert!(evaluation.contains("multiplicity_upper", &[usage_id, "6"]));
+    }
+
+    #[test]
+    fn emits_connection_endpoint_facts() {
+        let parse_report = parse_sysml_recovering(
+            "package Demo {
+                port def P;
+                part def A { port out: P; }
+                part def B { port input: P; }
+                part def System {
+                    part controller: A;
+                    part rotor: B;
+                    interface link connect controller.out to rotor.input;
+                }
+            }",
+        )
+        .unwrap();
+        let facts = sysml_module_assessment_facts(&parse_report.module);
+        let debug_facts = format!("{facts:#?}");
+        let evaluation = evaluate(facts, &[]).unwrap();
+        let link_id = "Demo::System::link";
+
+        assert!(evaluation.contains("interface_usage", &[link_id]));
+        assert!(
+            evaluation.contains("connected_source", &[link_id, "controller::out"]),
+            "{debug_facts}"
+        );
+        assert!(evaluation.contains("connected_target", &[link_id, "rotor::input"]));
+        assert!(evaluation.contains(
+            "connected_endpoint",
+            &[link_id, "source", "controller::out"]
+        ));
+        assert!(evaluation.contains(
+            "connected_endpoint",
+            &[link_id, "target", "rotor::input"]
+        ));
     }
 }

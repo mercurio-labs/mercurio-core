@@ -2,8 +2,8 @@ use std::path::Path;
 
 use crate::frontend::ast::{
     AliasDecl, BinaryOp, Declaration, Expr, GenericDefinitionDecl, GenericUsageDecl, ImportDecl,
-    LiteralExpr, PackageDecl, PartDefinitionDecl, PartUsageDecl, QualifiedName, SourceSpan,
-    SysmlModule, UnaryOp,
+    LiteralExpr, MultiplicityRange, PackageDecl, PartDefinitionDecl, PartUsageDecl, QualifiedName,
+    SourceSpan, SysmlModule, UnaryOp,
 };
 use crate::frontend::diagnostics::Diagnostic;
 use crate::frontend::lexer::{Token, TokenKind, lex};
@@ -13,7 +13,7 @@ use crate::frontend::resolver::{
 };
 use crate::frontend::transpile::{MappingBundle, transpile_module};
 use crate::ir::KirDocument;
-use crate::logging::log_compile_timed_event;
+use crate::logging::{compile_timer_start, log_compile_timed_event};
 use crate::paths::default_stdlib_path;
 
 #[derive(Debug)]
@@ -91,7 +91,7 @@ pub fn compile_sysml_text(
     source_name: &str,
     stdlib: &KirDocument,
 ) -> Result<KirDocument, Diagnostic> {
-    let parse_start = std::time::Instant::now();
+    let parse_start = compile_timer_start();
     let module = parse_sysml(input)?;
     log_compile_timed_event(
         "sysml.compile.parse",
@@ -107,7 +107,7 @@ pub fn compile_sysml_module(
     source_name: &str,
     stdlib: &KirDocument,
 ) -> Result<KirDocument, Diagnostic> {
-    let mapping_start = std::time::Instant::now();
+    let mapping_start = compile_timer_start();
     let mappings = MappingBundle::load()?;
     log_compile_timed_event(
         "sysml.compile.mapping_load",
@@ -116,7 +116,7 @@ pub fn compile_sysml_module(
         format!("source={}", source_name),
     );
 
-    let resolve_start = std::time::Instant::now();
+    let resolve_start = compile_timer_start();
     let resolved = resolve_module(module, stdlib, &mappings)?;
     log_compile_timed_event(
         "sysml.compile.resolve",
@@ -125,7 +125,7 @@ pub fn compile_sysml_module(
         format!("source={} context_modules=1", source_name),
     );
 
-    let transpile_start = std::time::Instant::now();
+    let transpile_start = compile_timer_start();
     let document = transpile_module(&resolved, source_name, &mappings)?;
     log_compile_timed_event(
         "sysml.compile.transpile",
@@ -146,7 +146,7 @@ pub fn compile_sysml_text_with_context(
     context_modules: &[SysmlModule],
     stdlib: &KirDocument,
 ) -> Result<KirDocument, Diagnostic> {
-    let parse_start = std::time::Instant::now();
+    let parse_start = compile_timer_start();
     let module = parse_sysml(input)?;
     log_compile_timed_event(
         "sysml.compile.parse",
@@ -163,7 +163,7 @@ pub fn compile_sysml_text_with_context_report(
     context_modules: &[SysmlModule],
     stdlib: &KirDocument,
 ) -> SemanticCompileReport {
-    let parse_start = std::time::Instant::now();
+    let parse_start = compile_timer_start();
     let parse_report = match parse_sysml_recovering(input) {
         Ok(report) => report,
         Err(diagnostic) => {
@@ -244,7 +244,8 @@ pub(crate) fn compile_sysml_module_with_context_report_with_limit(
             };
         }
     };
-    let resolver_context = match ResolverContext::from_modules(context_modules, stdlib, mappings) {
+    let working_context_modules = replace_equivalent_context_module(context_modules, module, module);
+    let resolver_context = match ResolverContext::from_modules(&working_context_modules, stdlib, mappings) {
         Ok(context) => context,
         Err(diagnostic) => {
             return SemanticCompileReport {
@@ -279,7 +280,7 @@ pub fn compile_sysml_module_with_resolver_context_report_with_limit(
     let mut owned_resolver_context = None;
 
     for attempt in 0..max_attempts {
-        let attempt_start = std::time::Instant::now();
+        let attempt_start = compile_timer_start();
         let active_resolver_context = owned_resolver_context.as_ref().unwrap_or(resolver_context);
         match compile_sysml_module_with_resolver_context(
             &working_module,
@@ -380,7 +381,7 @@ pub fn compile_sysml_module_with_context(
     context_modules: &[SysmlModule],
     stdlib: &KirDocument,
 ) -> Result<KirDocument, Diagnostic> {
-    let mapping_start = std::time::Instant::now();
+    let mapping_start = compile_timer_start();
     let mappings = MappingBundle::load()?;
     log_compile_timed_event(
         "sysml.compile.mapping_load",
@@ -389,7 +390,7 @@ pub fn compile_sysml_module_with_context(
         format!("source={}", source_name),
     );
 
-    let resolve_start = std::time::Instant::now();
+    let resolve_start = compile_timer_start();
     let resolved = resolve_module_with_context(module, context_modules, stdlib, &mappings)?;
     log_compile_timed_event(
         "sysml.compile.resolve",
@@ -402,7 +403,7 @@ pub fn compile_sysml_module_with_context(
         ),
     );
 
-    let transpile_start = std::time::Instant::now();
+    let transpile_start = compile_timer_start();
     let document = transpile_module(&resolved, source_name, &mappings)?;
     log_compile_timed_event(
         "sysml.compile.transpile",
@@ -423,7 +424,7 @@ pub(crate) fn compile_sysml_module_with_resolver_context(
     resolver_context: &ResolverContext,
     mappings: &MappingBundle,
 ) -> Result<KirDocument, Diagnostic> {
-    let resolve_start = std::time::Instant::now();
+    let resolve_start = compile_timer_start();
     let resolved = resolve_module_with_resolver_context(module, resolver_context, mappings)?;
     log_compile_timed_event(
         "sysml.compile.resolve",
@@ -436,7 +437,7 @@ pub(crate) fn compile_sysml_module_with_resolver_context(
         ),
     );
 
-    let transpile_start = std::time::Instant::now();
+    let transpile_start = compile_timer_start();
     let document = transpile_module(&resolved, source_name, mappings)?;
     log_compile_timed_event(
         "sysml.compile.transpile",
@@ -779,6 +780,7 @@ impl Parser {
             is_implicit_name: false,
             ty: tail.ty,
             reference_target: None,
+            multiplicity: tail.multiplicity,
             expression: tail.expression,
             additional_types: tail.additional_types,
             specializes: tail.specializes,
@@ -927,6 +929,7 @@ impl Parser {
             is_implicit_name: true,
             ty: tail.ty,
             reference_target,
+            multiplicity: tail.multiplicity,
             expression: tail.expression,
             additional_types: tail.additional_types,
             specializes: tail.specializes,
@@ -987,6 +990,7 @@ impl Parser {
             is_implicit_name: false,
             ty: None,
             reference_target: None,
+            multiplicity: None,
             expression: None,
             additional_types: Vec::new(),
             specializes: Vec::new(),
@@ -1104,6 +1108,7 @@ impl Parser {
             is_implicit_name: false,
             ty: None,
             reference_target,
+            multiplicity: None,
             expression: None,
             additional_types: Vec::new(),
             specializes: Vec::new(),
@@ -1386,6 +1391,7 @@ impl Parser {
         let mut tail = if keyword == "connect" {
             UsageTail {
                 ty: None,
+                multiplicity: None,
                 expression: None,
                 additional_types: Vec::new(),
                 specializes: Vec::new(),
@@ -1395,7 +1401,7 @@ impl Parser {
                 had_body: false,
             }
         } else {
-            self.parse_usage_tail(if keyword == "connection" {
+            self.parse_usage_tail(if matches!(keyword, "connection" | "interface") {
                 &["connect"]
             } else {
                 &[]
@@ -1429,6 +1435,7 @@ impl Parser {
                 name,
                 is_implicit_name,
                 ty: tail.ty,
+                multiplicity: tail.multiplicity,
                 expression: tail.expression.clone(),
                 additional_types: tail.additional_types,
                 specializes: tail.specializes,
@@ -1445,6 +1452,7 @@ impl Parser {
                 is_implicit_name,
                 ty: tail.ty,
                 reference_target,
+                multiplicity: tail.multiplicity,
                 expression: tail.expression,
                 additional_types: tail.additional_types,
                 specializes: tail.specializes,
@@ -1527,6 +1535,7 @@ impl Parser {
             is_implicit_name,
             ty: None,
             reference_target: None,
+            multiplicity: None,
             expression: None,
             additional_types: Vec::new(),
             specializes: Vec::new(),
@@ -1590,6 +1599,7 @@ impl Parser {
             is_implicit_name,
             ty: None,
             reference_target: None,
+            multiplicity: None,
             expression: None,
             additional_types: Vec::new(),
             specializes: Vec::new(),
@@ -1619,6 +1629,7 @@ impl Parser {
             is_implicit_name: false,
             ty: tail.ty,
             reference_target: None,
+            multiplicity: tail.multiplicity,
             expression: tail.expression,
             additional_types: tail.additional_types,
             specializes: tail.specializes,
@@ -1690,6 +1701,7 @@ impl Parser {
 
     fn parse_usage_tail(&mut self, stop_keywords: &[&str]) -> Result<UsageTail, Diagnostic> {
         let mut ty = None;
+        let mut multiplicity = None;
         let mut expression = None;
         let mut additional_types = Vec::new();
         let mut specializes = Vec::new();
@@ -1698,7 +1710,9 @@ impl Parser {
         let mut body_members = Vec::new();
         let mut had_body = false;
 
-        self.consume_suffix_adornments()?;
+        if let Some(parsed) = self.consume_suffix_adornments()? {
+            multiplicity = Some(parsed);
+        }
 
         loop {
             match self.peek_kind() {
@@ -1715,7 +1729,9 @@ impl Parser {
                         } else {
                             additional_types.push(first);
                         }
-                        self.consume_suffix_adornments()?;
+                        if let Some(parsed) = self.consume_suffix_adornments()? {
+                            multiplicity = Some(parsed);
+                        }
                         while matches!(self.peek_kind(), TokenKind::Comma) {
                             self.advance();
                             conjugated = self.consume_optional_type_prefix();
@@ -1780,6 +1796,7 @@ impl Parser {
 
         Ok(UsageTail {
             ty,
+            multiplicity,
             expression,
             additional_types,
             specializes,
@@ -2141,7 +2158,7 @@ impl Parser {
         keyword: &str,
         tail: &mut UsageTail,
     ) -> Result<(), Diagnostic> {
-        let starts_named_connect = keyword == "connection"
+        let starts_named_connect = matches!(keyword, "connection" | "interface")
             && matches!(self.peek_kind(), TokenKind::Identifier(value) if value == "connect");
         if starts_named_connect {
             self.expect_identifier_named("connect", "expected `connect`")?;
@@ -2219,6 +2236,7 @@ impl Parser {
             is_implicit_name: false,
             ty: None,
             reference_target: Some(reference_target),
+            multiplicity: None,
             expression: None,
             additional_types: Vec::new(),
             specializes: Vec::new(),
@@ -2416,6 +2434,7 @@ impl Parser {
     }
 
     fn recover_declaration(&mut self) {
+        let start_index = self.index;
         self.pending_docs.clear();
         while !matches!(self.peek_kind(), TokenKind::Eof | TokenKind::RBrace) {
             match self.peek_kind() {
@@ -2430,6 +2449,9 @@ impl Parser {
                 _ => self.advance(),
             }
         }
+        if self.index == start_index && !self.at_end() {
+            self.advance();
+        }
     }
 
     fn consume_angle_adornments(&mut self) -> Result<(), Diagnostic> {
@@ -2439,17 +2461,38 @@ impl Parser {
         Ok(())
     }
 
-    fn consume_suffix_adornments(&mut self) -> Result<(), Diagnostic> {
+    fn consume_suffix_adornments(&mut self) -> Result<Option<MultiplicityRange>, Diagnostic> {
+        let mut multiplicity = None;
         while matches!(self.peek_kind(), TokenKind::LBracket | TokenKind::LAngle) {
             match self.peek_kind() {
                 TokenKind::LBracket => {
-                    self.consume_balanced(TokenKind::LBracket, TokenKind::RBracket)?
+                    let parsed = self.parse_multiplicity_range()?;
+                    multiplicity.get_or_insert(parsed);
                 }
                 TokenKind::LAngle => self.consume_balanced(TokenKind::LAngle, TokenKind::RAngle)?,
                 _ => unreachable!(),
             }
         }
-        Ok(())
+        Ok(multiplicity)
+    }
+
+    fn parse_multiplicity_range(&mut self) -> Result<MultiplicityRange, Diagnostic> {
+        let start = self.expect(TokenKind::LBracket, "expected `[` before multiplicity")?;
+        let mut parts = Vec::new();
+        while !matches!(self.peek_kind(), TokenKind::RBracket | TokenKind::Eof) {
+            let token = self.current().clone();
+            parts.push(multiplicity_token_text(&token.kind));
+            self.advance();
+        }
+        let end = self.expect(TokenKind::RBracket, "expected `]` after multiplicity")?;
+        let raw = normalize_multiplicity_raw(&parts.join(""));
+        let (lower, upper) = multiplicity_bounds(&raw);
+        Ok(MultiplicityRange {
+            lower,
+            upper,
+            raw,
+            span: merge_span(&start.span, &end.span),
+        })
     }
 
     fn consume_balanced(&mut self, open: TokenKind, close: TokenKind) -> Result<(), Diagnostic> {
@@ -2759,6 +2802,7 @@ fn append_module_member(module: &mut SysmlModule, declaration: Declaration) {
 
 struct UsageTail {
     ty: Option<QualifiedName>,
+    multiplicity: Option<MultiplicityRange>,
     expression: Option<Expr>,
     additional_types: Vec<QualifiedName>,
     specializes: Vec<QualifiedName>,
@@ -2781,6 +2825,34 @@ impl UsageTail {
     }
 }
 
+fn multiplicity_token_text(kind: &TokenKind) -> String {
+    match kind {
+        TokenKind::Number(value) | TokenKind::Identifier(value) | TokenKind::String(value) => {
+            value.clone()
+        }
+        TokenKind::Star => "*".to_string(),
+        TokenKind::Dot => ".".to_string(),
+        TokenKind::Comma => ",".to_string(),
+        TokenKind::Colon => ":".to_string(),
+        TokenKind::Minus => "-".to_string(),
+        TokenKind::Plus => "+".to_string(),
+        _ => String::new(),
+    }
+}
+
+fn normalize_multiplicity_raw(raw: &str) -> String {
+    raw.replace(". .", "..")
+        .replace(" ", "")
+        .replace("...", "..")
+}
+
+fn multiplicity_bounds(raw: &str) -> (String, String) {
+    if let Some((lower, upper)) = raw.split_once("..") {
+        return (lower.to_string(), upper.to_string());
+    }
+    (raw.to_string(), raw.to_string())
+}
+
 fn synthetic_reference_usage(
     name: &str,
     ty: Option<QualifiedName>,
@@ -2794,6 +2866,7 @@ fn synthetic_reference_usage(
         is_implicit_name: false,
         ty,
         reference_target,
+        multiplicity: None,
         expression: None,
         additional_types: Vec::new(),
         specializes: Vec::new(),
@@ -2862,7 +2935,7 @@ mod tests {
     use super::{
         SemanticCompileStatus, compile_sysml_module_with_context,
         compile_sysml_module_with_context_report, compile_sysml_text_with_context_report,
-        load_sysml_document, parse_sysml,
+        load_sysml_document, parse_sysml, parse_sysml_recovering,
     };
     use crate::frontend::ast::{Declaration, Expr};
     use crate::frontend::resolver::resolve_module;
@@ -2895,6 +2968,19 @@ mod tests {
         let package = module.package.unwrap();
         assert_eq!(package.name.as_dot_string(), "Demo2");
         assert_eq!(package.definitions.len(), 2);
+    }
+
+    #[test]
+    fn recovering_parser_consumes_unmatched_closing_brace() {
+        let report = parse_sysml_recovering("package Demo { } }").unwrap();
+
+        assert!(report.module.package.is_some());
+        assert_eq!(report.diagnostics.len(), 1);
+        assert!(
+            report.diagnostics[0]
+                .message
+                .contains("expected a declaration")
+        );
     }
 
     #[test]
@@ -3258,7 +3344,7 @@ mod tests {
     fn partial_compile_recovers_invalid_interface_end_and_preserves_valid_sibling_end() {
         let stdlib = fake_stdlib(["SysML::Systems::PartDefinition"]);
         let report = compile_sysml_text_with_context_report(
-            "package Demo { port def FuelOutPort; port def FuelInPort; interface def FuelInterface { end supplierPort : FuelOutPort; end consumerPort : FuelInPort; } }",
+            "package Demo { port def FuelInPort; interface def FuelInterface { end supplierPort : MissingFuelOutPort; end consumerPort : FuelInPort; } }",
             "inline.sysml",
             &[],
             &stdlib,
@@ -3269,7 +3355,7 @@ mod tests {
             report
                 .diagnostics
                 .iter()
-                .any(|diagnostic| { diagnostic.message.contains("unresolved type `FuelOutPort`") })
+                .any(|diagnostic| { diagnostic.message.contains("unresolved type `MissingFuelOutPort`") })
         );
         let kir = report.document.unwrap();
         assert!(kir.elements.iter().any(|element| {
@@ -4540,6 +4626,54 @@ mod tests {
                 .iter()
                 .any(|element| element.id == "type.Demo.AlsoGood")
         );
+    }
+
+    #[test]
+    fn semantic_compile_resolves_same_package_type_references() {
+        let stdlib = fake_stdlib(["SysML::Systems::PartDefinition"]);
+        let report = compile_sysml_text_with_context_report(
+            "package UavModel { part def BatteryPack; part flightBattery: BatteryPack; }",
+            "inline.sysml",
+            &[],
+            &stdlib,
+        );
+
+        assert_eq!(report.status, SemanticCompileStatus::Ok);
+        assert!(report.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn semantic_compile_resolves_wildcard_imported_package_types() {
+        let stdlib = fake_stdlib(["SysML::Systems::PartDefinition"]);
+        let report = compile_sysml_text_with_context_report(
+            "package UavLibrary { part def BatteryPack; part def FlightComputer; } package UavSystem { import UavLibrary::*; part flightBattery: BatteryPack; part controller: FlightComputer; }",
+            "inline.sysml",
+            &[],
+            &stdlib,
+        );
+
+        assert_eq!(report.status, SemanticCompileStatus::Ok);
+        assert!(report.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn semantic_compile_does_not_resolve_sibling_package_types_without_import() {
+        let stdlib = fake_stdlib(["SysML::Systems::PartDefinition"]);
+        let report = compile_sysml_text_with_context_report(
+            "package UavLibrary2 { part def BatteryPack; part def FlightComputer; } package UavSystem { import UavLibrary::*; part flightBattery: BatteryPack; part controller: FlightComputer; }",
+            "inline.sysml",
+            &[],
+            &stdlib,
+        );
+
+        assert_ne!(report.status, SemanticCompileStatus::Ok);
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("unresolved import `UavLibrary::*`")
+                || diagnostic.message.contains("unresolved type `BatteryPack`")
+                || diagnostic.message.contains("unresolved type `FlightComputer`")
+        }));
     }
 
     #[test]
