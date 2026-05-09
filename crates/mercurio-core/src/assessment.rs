@@ -52,6 +52,23 @@ pub struct AssessmentReport {
     pub assertions: Vec<AssessmentAssertionReport>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeAssessmentRequest {
+    pub spec: AssessmentSpec,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rulepacks: Vec<RulePack>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub facts: Vec<Fact>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeAssessmentResult {
+    pub report: AssessmentReport,
+    pub facts: Vec<Fact>,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AssessmentStatus {
@@ -106,6 +123,26 @@ pub fn run_graph_assessment(
         .collect::<Vec<_>>();
     let evaluation = evaluate(facts, &rules)?;
     run_evaluation_assessment(&evaluation, spec)
+}
+
+pub fn run_runtime_assessment(
+    request: RuntimeAssessmentRequest,
+) -> Result<RuntimeAssessmentResult, AssessmentError> {
+    let mut facts = request.facts;
+    for pack in &request.rulepacks {
+        facts.extend(pack.facts.iter().cloned());
+    }
+    let rules = request
+        .rulepacks
+        .iter()
+        .flat_map(|pack| pack.rules.iter().cloned())
+        .collect::<Vec<_>>();
+    let evaluation = evaluate(facts, &rules)?;
+    let report = run_evaluation_assessment(&evaluation, &request.spec)?;
+    Ok(RuntimeAssessmentResult {
+        report,
+        facts: evaluation.facts().iter().cloned().collect(),
+    })
 }
 
 pub fn run_evaluation_assessment(
@@ -466,6 +503,59 @@ mod tests {
         assert_eq!(report.status, AssessmentStatus::Pass);
         assert_eq!(report.assertions[0].binding_count, 2);
         assert_eq!(report.assertions[1].binding_count, 1);
+    }
+
+    #[test]
+    fn runs_runtime_assessment_from_supplied_facts_rules_and_queries() {
+        let request = RuntimeAssessmentRequest {
+            facts: vec![Fact::new("package", ["Demo".to_string()])],
+            rulepacks: vec![RulePack {
+                id: "test.derived".to_string(),
+                version: "0.1.0".to_string(),
+                metadata: BTreeMap::new(),
+                facts: vec![],
+                rules: vec![crate::datalog::Rule {
+                    id: "top-level-package-from-package".to_string(),
+                    head: Atom {
+                        predicate: "top_level_package".to_string(),
+                        terms: vec![Term::Var("P".to_string())],
+                    },
+                    body: vec![Atom {
+                        predicate: "package".to_string(),
+                        terms: vec![Term::Var("P".to_string())],
+                    }],
+                }],
+            }],
+            spec: AssessmentSpec {
+                id: "runtime.package.demo".to_string(),
+                title: "Runtime package check".to_string(),
+                assertions: vec![AssessmentAssertion {
+                    id: "has-demo-package".to_string(),
+                    description: "A derived top-level package exists".to_string(),
+                    query: AssessmentQuery {
+                        find: vec!["P".to_string()],
+                        where_atoms: vec![Atom {
+                            predicate: "top_level_package".to_string(),
+                            terms: vec![Term::Var("P".to_string())],
+                        }],
+                    },
+                    expect: AssessmentExpectation::ContainsBinding {
+                        variable: "P".to_string(),
+                        value: "Demo".to_string(),
+                    },
+                }],
+            },
+        };
+
+        let result = run_runtime_assessment(request).unwrap();
+
+        assert_eq!(result.report.status, AssessmentStatus::Pass);
+        assert!(
+            result
+                .facts
+                .iter()
+                .any(|fact| fact.predicate == "top_level_package" && fact.terms == ["Demo"])
+        );
     }
 
     #[test]

@@ -38,8 +38,9 @@ pub use ai::{
 };
 pub use assessment::{
     AssessmentAssertion, AssessmentAssertionReport, AssessmentError, AssessmentExpectation,
-    AssessmentQuery, AssessmentReport, AssessmentSpec, AssessmentStatus, query_evaluation,
-    run_evaluation_assessment, run_graph_assessment, sysml_module_assessment_facts,
+    AssessmentQuery, AssessmentReport, AssessmentSpec, AssessmentStatus, RuntimeAssessmentRequest,
+    RuntimeAssessmentResult, query_evaluation, run_evaluation_assessment, run_graph_assessment,
+    run_runtime_assessment, sysml_module_assessment_facts,
 };
 pub use authoring::{
     Alias, AttributeWritePolicy, AuthoringError, AuthoringModule, AuthoringProject,

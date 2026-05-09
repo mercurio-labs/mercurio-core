@@ -4,12 +4,12 @@ use mercurio_core::diagrams::DiagramError;
 use mercurio_core::frontend::ast::{Declaration, PartUsageDecl, SourceSpan};
 use mercurio_core::frontend::sysml::parse_sysml_recovering;
 use mercurio_core::{
-    AssessmentAssertion, AssessmentExpectation, AssessmentQuery, AssessmentSpec, AssessmentStatus,
-    Atom, DiagramRenderRequestDto, ExecutionContext, Graph, KirDocument,
-    MetamodelAttributeRegistry, Runtime, SourceLanguage, Term, compile_kerml_text,
-    compile_sysml_text_with_context_report, evaluate, format_text, lint_text, list_diagram_kinds,
+    AssessmentSpec, AssessmentStatus, DiagramRenderRequestDto, ExecutionContext, Fact, Graph,
+    KirDocument, MetamodelAttributeRegistry, RulePack, Runtime, RuntimeAssessmentRequest,
+    SourceLanguage, compile_kerml_text,
+    compile_sysml_text_with_context_report, format_text, lint_text, list_diagram_kinds,
     load_default_rulepacks, parse_kerml, render_diagram, requirements_table_view,
-    run_evaluation_assessment, run_graph_assessment, sysml_module_assessment_facts,
+    run_graph_assessment, run_runtime_assessment, sysml_module_assessment_facts,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -153,34 +153,97 @@ pub fn wasm_run_assessment(document: JsValue, spec: JsValue) -> JsValue {
     })
 }
 
-#[wasm_bindgen(js_name = runTrainingAssessment)]
-pub fn wasm_run_training_assessment(input: &str, request: JsValue) -> JsValue {
+#[wasm_bindgen(js_name = runSourceAssessment)]
+pub fn wasm_run_source_assessment(input: &str, request: JsValue) -> JsValue {
     json_response(|| {
-        let request: TrainingAssessmentRequest = from_js(request)?;
-        match request.assessment_id.as_str() {
-            "package-structure.two-packages" => {
-                run_package_structure_training_assessment(input, request)
-            }
-            "part-usage.rotors-six" => run_rotors_multiplicity_training_assessment(input, request),
-            "interface-connection.command-link" => {
-                run_command_link_training_assessment(input, request)
-            }
-            _ => Ok(success(
-                json!({
-                    "assessmentId": request.assessment_id,
-                    "status": "failed",
-                    "command": "mercurio assess",
-                    "transcript": ["unsupported assessment id"],
-                    "facts": {
-                        "packages": [],
-                        "packageCount": 0,
-                        "expectedPackageCount": request.expected_package_count,
-                    },
-                    "diagnostics": [],
-                }),
-                [("runtime", json!("wasm"))],
-            )),
+        let request: SourceAssessmentRequest = from_js(request)?;
+        let language = parse_language(&request.language)?;
+        if language != SourceLanguage::Sysml {
+            return Err(WasmError::new(
+                "language",
+                "source assessments currently support SysML sources",
+            ));
         }
+
+        let command = request.command.clone().unwrap_or_else(|| {
+            format!(
+                "mercurio assess {} --spec {}",
+                request.filename, request.spec.id
+            )
+        });
+        let parse_report = match parse_sysml_recovering(input) {
+            Ok(report) => report,
+            Err(diagnostic) => {
+                return Ok(success(
+                    json!({
+                        "assessmentId": request.spec.id,
+                        "status": "failed",
+                        "command": command,
+                        "report": null,
+                        "transcript": [
+                            "checking source assessment...",
+                            "parsing source...",
+                            format!("parse error: {}", diagnostic.message),
+                            "result: failed",
+                        ],
+                        "facts": {
+                            "factCount": 0,
+                            "predicates": [],
+                            "items": [],
+                        },
+                        "diagnostics": [snippet_diagnostic(&diagnostic)],
+                    }),
+                    [("runtime", json!("wasm"))],
+                ));
+            }
+        };
+
+        let diagnostics = parse_report
+            .diagnostics
+            .iter()
+            .map(snippet_diagnostic)
+            .collect::<Vec<_>>();
+        let mut facts = sysml_module_assessment_facts(&parse_report.module);
+        facts.extend(request.facts);
+        let result = run_runtime_assessment(RuntimeAssessmentRequest {
+            spec: request.spec,
+            rulepacks: request.rulepacks,
+            facts,
+        })?;
+        let passed = diagnostics.is_empty() && result.report.status == AssessmentStatus::Pass;
+        let mut transcript = vec![
+            "checking source assessment...".to_string(),
+            "parsing source...".to_string(),
+            "building assessment fact base...".to_string(),
+            format!("running assessment `{}`...", result.report.id),
+        ];
+        if !diagnostics.is_empty() {
+            transcript.push(format!("diagnostics: {}", diagnostics.len()));
+        }
+        for assertion in &result.report.assertions {
+            transcript.push(format!(
+                "assert {}: {}",
+                assertion.id,
+                match assertion.status {
+                    AssessmentStatus::Pass => "pass",
+                    AssessmentStatus::Failed => "failed",
+                }
+            ));
+        }
+        transcript.push(format!("result: {}", if passed { "pass" } else { "failed" }));
+
+        Ok(success(
+            json!({
+                "assessmentId": result.report.id,
+                "status": if passed { "pass" } else { "failed" },
+                "command": command,
+                "report": result.report,
+                "transcript": transcript,
+                "facts": assessment_fact_summary(&result.facts),
+                "diagnostics": diagnostics,
+            }),
+            [("runtime", json!("wasm"))],
+        ))
     })
 }
 
@@ -446,12 +509,18 @@ struct RuntimeValueDto {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct TrainingAssessmentRequest {
-    assessment_id: String,
+struct SourceAssessmentRequest {
+    spec: AssessmentSpec,
+    #[serde(default)]
+    rulepacks: Vec<RulePack>,
+    #[serde(default)]
+    facts: Vec<Fact>,
     #[serde(default = "default_source_name")]
     filename: String,
+    #[serde(default = "default_source_language")]
+    language: String,
     #[serde(default)]
-    expected_package_count: Option<usize>,
+    command: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -579,602 +648,18 @@ fn semantic_status(status: mercurio_core::SemanticCompileStatus) -> &'static str
     }
 }
 
-fn run_package_structure_training_assessment(
-    input: &str,
-    request: TrainingAssessmentRequest,
-) -> Result<Response, WasmError> {
-    let expected_package_count = request.expected_package_count.unwrap_or(2);
-    let command = format!(
-        "mercurio assess {} --check package-structure --expect packages={expected_package_count}",
-        request.filename
-    );
-    let parse_report = match parse_sysml_recovering(input) {
-        Ok(report) => report,
-        Err(diagnostic) => {
-            return Ok(success(
-                json!({
-                    "assessmentId": request.assessment_id,
-                    "status": "failed",
-                    "command": command,
-                    "transcript": [
-                        "checking package structure...",
-                        "parsing source...",
-                        format!("parse error: {}", diagnostic.message),
-                        "result: failed",
-                    ],
-                    "facts": {
-                        "packages": [],
-                        "packageCount": 0,
-                        "expectedPackageCount": expected_package_count,
-                    },
-                    "diagnostics": [snippet_diagnostic(&diagnostic)],
-                }),
-                [("runtime", json!("wasm"))],
-            ));
-        }
-    };
-
-    let diagnostics = parse_report
-        .diagnostics
+fn assessment_fact_summary(facts: &[Fact]) -> Value {
+    let mut predicates = facts
         .iter()
-        .map(snippet_diagnostic)
+        .map(|fact| fact.predicate.clone())
         .collect::<Vec<_>>();
-    let facts = sysml_module_assessment_facts(&parse_report.module);
-    let evaluation = evaluate(facts, &[])?;
-    let spec = package_structure_assessment_spec(expected_package_count);
-    let report = run_evaluation_assessment(&evaluation, &spec)?;
-    let packages = package_bindings(&evaluation);
-    let package_count = packages.len();
-    let passed = diagnostics.is_empty() && report.status == AssessmentStatus::Pass;
-    let mut transcript = vec![
-        "checking package structure...".to_string(),
-        "parsing source...".to_string(),
-        "building assessment fact base...".to_string(),
-        format!("running core assessment `{}`...", report.id),
-        "found packages:".to_string(),
-    ];
-    if packages.is_empty() {
-        transcript.push("  none".to_string());
-    } else {
-        transcript.extend(packages.iter().map(|package| format!("  - {package}")));
-    }
-    transcript.push(format!(
-        "expected packages: {expected_package_count}; actual packages: {package_count}"
-    ));
-    if !diagnostics.is_empty() {
-        transcript.push(format!("diagnostics: {}", diagnostics.len()));
-    }
-    for assertion in &report.assertions {
-        transcript.push(format!(
-            "assert {}: {}",
-            assertion.id,
-            match assertion.status {
-                AssessmentStatus::Pass => "pass",
-                AssessmentStatus::Failed => "failed",
-            }
-        ));
-    }
-    transcript.push(format!("result: {}", if passed { "pass" } else { "failed" }));
-
-    Ok(success(
-        json!({
-            "assessmentId": request.assessment_id,
-            "status": if passed { "pass" } else { "failed" },
-            "command": command,
-            "transcript": transcript,
-            "facts": {
-                "packages": packages,
-                "packageCount": package_count,
-                "expectedPackageCount": expected_package_count,
-            },
-            "diagnostics": diagnostics,
-        }),
-        [("runtime", json!("wasm"))],
-    ))
-}
-
-fn run_rotors_multiplicity_training_assessment(
-    input: &str,
-    request: TrainingAssessmentRequest,
-) -> Result<Response, WasmError> {
-    let command = format!(
-        "mercurio assess {} --check part-usage --expect rotors.multiplicity=6",
-        request.filename
-    );
-    let parse_report = match parse_sysml_recovering(input) {
-        Ok(report) => report,
-        Err(diagnostic) => {
-            return Ok(success(
-                json!({
-                    "assessmentId": request.assessment_id,
-                    "status": "failed",
-                    "command": command,
-                    "transcript": [
-                        "checking rotor part usage...",
-                        "parsing source...",
-                        format!("parse error: {}", diagnostic.message),
-                        "result: failed",
-                    ],
-                    "facts": {
-                        "partUsageFound": false,
-                        "typeFound": false,
-                        "multiplicity": null,
-                        "expectedMultiplicity": "6",
-                    },
-                    "diagnostics": [snippet_diagnostic(&diagnostic)],
-                }),
-                [("runtime", json!("wasm"))],
-            ));
-        }
-    };
-
-    let diagnostics = parse_report
-        .diagnostics
-        .iter()
-        .map(snippet_diagnostic)
-        .collect::<Vec<_>>();
-    let facts = sysml_module_assessment_facts(&parse_report.module);
-    let evaluation = evaluate(facts, &[])?;
-    let spec = rotors_multiplicity_assessment_spec();
-    let report = run_evaluation_assessment(&evaluation, &spec)?;
-    let passed = diagnostics.is_empty() && report.status == AssessmentStatus::Pass;
-    let rotor_usage_id = named_part_usage_id(&evaluation, "rotors");
-    let found_type = rotor_usage_id
-        .as_deref()
-        .and_then(|usage_id| fact_value(&evaluation, "type", usage_id))
-        .unwrap_or_else(|| "not found".to_string());
-    let found_multiplicity = rotor_usage_id
-        .as_deref()
-        .and_then(|usage_id| fact_value(&evaluation, "multiplicity", usage_id))
-        .unwrap_or_else(|| "not found".to_string());
-    let mut transcript = vec![
-        "checking rotor part usage...".to_string(),
-        "parsing source...".to_string(),
-        "building assessment fact base...".to_string(),
-        format!("running core assessment `{}`...", report.id),
-        format!(
-            "part usage `rotors`: {}",
-            if rotor_usage_id.is_some() { "found" } else { "not found" }
-        ),
-        format!("type: {found_type}"),
-        format!("multiplicity: {found_multiplicity}"),
-        "expected multiplicity: 6".to_string(),
-    ];
-    if !diagnostics.is_empty() {
-        transcript.push(format!("diagnostics: {}", diagnostics.len()));
-    }
-    for assertion in &report.assertions {
-        transcript.push(format!(
-            "assert {}: {}",
-            assertion.id,
-            match assertion.status {
-                AssessmentStatus::Pass => "pass",
-                AssessmentStatus::Failed => "failed",
-            }
-        ));
-    }
-    transcript.push(format!("result: {}", if passed { "pass" } else { "failed" }));
-
-    Ok(success(
-        json!({
-            "assessmentId": request.assessment_id,
-            "status": if passed { "pass" } else { "failed" },
-            "command": command,
-            "transcript": transcript,
-            "facts": {
-                "partUsageFound": rotor_usage_id.is_some(),
-                "typeFound": found_type == "RotorAssembly",
-                "type": if found_type == "not found" { None::<String> } else { Some(found_type) },
-                "multiplicity": if found_multiplicity == "not found" { None::<String> } else { Some(found_multiplicity) },
-                "expectedMultiplicity": "6",
-            },
-            "diagnostics": diagnostics,
-        }),
-        [("runtime", json!("wasm"))],
-    ))
-}
-
-fn run_command_link_training_assessment(
-    input: &str,
-    request: TrainingAssessmentRequest,
-) -> Result<Response, WasmError> {
-    let expected_source = "controller::commandOut";
-    let expected_target = "rotor::commandIn";
-    let command = format!(
-        "mercurio assess {} --check interface-connection --expect {expected_source}->{expected_target}",
-        request.filename
-    );
-    let parse_report = match parse_sysml_recovering(input) {
-        Ok(report) => report,
-        Err(diagnostic) => {
-            return Ok(success(
-                json!({
-                    "assessmentId": request.assessment_id,
-                    "status": "failed",
-                    "command": command,
-                    "transcript": [
-                        "checking interface connection...",
-                        "parsing source...",
-                        format!("parse error: {}", diagnostic.message),
-                        "result: failed",
-                    ],
-                    "facts": {
-                        "connectionFound": false,
-                        "source": null,
-                        "target": null,
-                        "expectedSource": expected_source,
-                        "expectedTarget": expected_target,
-                    },
-                    "diagnostics": [snippet_diagnostic(&diagnostic)],
-                }),
-                [("runtime", json!("wasm"))],
-            ));
-        }
-    };
-
-    let diagnostics = parse_report
-        .diagnostics
-        .iter()
-        .map(snippet_diagnostic)
-        .collect::<Vec<_>>();
-    let facts = sysml_module_assessment_facts(&parse_report.module);
-    let evaluation = evaluate(facts, &[])?;
-    let spec = command_link_assessment_spec();
-    let report = run_evaluation_assessment(&evaluation, &spec)?;
-    let passed = diagnostics.is_empty() && report.status == AssessmentStatus::Pass;
-    let interface_id = first_interface_usage_id(&evaluation);
-    let connection_id = interface_usage_with_endpoints(&evaluation, expected_source, expected_target);
-    let found_source = connection_id
-        .as_deref()
-        .and_then(|id| fact_value(&evaluation, "connected_source", id))
-        .unwrap_or_else(|| "not found".to_string());
-    let found_target = connection_id
-        .as_deref()
-        .and_then(|id| fact_value(&evaluation, "connected_target", id))
-        .unwrap_or_else(|| "not found".to_string());
-    let mut transcript = vec![
-        "checking interface connection...".to_string(),
-        "parsing source...".to_string(),
-        "building assessment fact base...".to_string(),
-        format!("running core assessment `{}`...", report.id),
-        format!(
-            "interface usage: {}",
-            interface_id.as_deref().unwrap_or("not found")
-        ),
-        format!("interface connection: {}", connection_id.as_deref().unwrap_or("not found")),
-        format!("source endpoint: {found_source}"),
-        format!("target endpoint: {found_target}"),
-        format!("expected: {expected_source} -> {expected_target}"),
-    ];
-    if !diagnostics.is_empty() {
-        transcript.push(format!("diagnostics: {}", diagnostics.len()));
-    }
-    for assertion in &report.assertions {
-        transcript.push(format!(
-            "assert {}: {}",
-            assertion.id,
-            match assertion.status {
-                AssessmentStatus::Pass => "pass",
-                AssessmentStatus::Failed => "failed",
-            }
-        ));
-    }
-    transcript.push(format!("result: {}", if passed { "pass" } else { "failed" }));
-
-    Ok(success(
-        json!({
-            "assessmentId": request.assessment_id,
-            "status": if passed { "pass" } else { "failed" },
-            "command": command,
-            "transcript": transcript,
-            "facts": {
-                "interfaceFound": interface_id.is_some(),
-                "connectionFound": connection_id.is_some(),
-                "interface": interface_id,
-                "connection": connection_id,
-                "source": if found_source == "not found" { None::<String> } else { Some(found_source) },
-                "target": if found_target == "not found" { None::<String> } else { Some(found_target) },
-                "expectedSource": expected_source,
-                "expectedTarget": expected_target,
-            },
-            "diagnostics": diagnostics,
-        }),
-        [("runtime", json!("wasm"))],
-    ))
-}
-
-fn package_structure_assessment_spec(expected_package_count: usize) -> AssessmentSpec {
-    AssessmentSpec {
-        id: "training.packages.1_1".to_string(),
-        title: "Package structure".to_string(),
-        assertions: vec![
-            AssessmentAssertion {
-                id: "two-top-level-packages".to_string(),
-                description: "Model declares the expected number of top-level packages".to_string(),
-                query: AssessmentQuery {
-                    find: vec!["P".to_string()],
-                    where_atoms: vec![Atom {
-                        predicate: "top_level_package".to_string(),
-                        terms: vec![Term::Var("P".to_string())],
-                    }],
-                },
-                expect: AssessmentExpectation::CountEq {
-                    value: expected_package_count,
-                },
-            },
-            AssessmentAssertion {
-                id: "has-uav-library".to_string(),
-                description: "One package is named UavLibrary".to_string(),
-                query: AssessmentQuery {
-                    find: vec!["P".to_string()],
-                    where_atoms: vec![
-                        Atom {
-                            predicate: "package".to_string(),
-                            terms: vec![Term::Var("P".to_string())],
-                        },
-                        Atom {
-                            predicate: "name".to_string(),
-                            terms: vec![
-                                Term::Var("P".to_string()),
-                                Term::Const("UavLibrary".to_string()),
-                            ],
-                        },
-                    ],
-                },
-                expect: AssessmentExpectation::Exists,
-            },
-            AssessmentAssertion {
-                id: "has-uav-system".to_string(),
-                description: "One package is named UavSystem".to_string(),
-                query: AssessmentQuery {
-                    find: vec!["P".to_string()],
-                    where_atoms: vec![
-                        Atom {
-                            predicate: "package".to_string(),
-                            terms: vec![Term::Var("P".to_string())],
-                        },
-                        Atom {
-                            predicate: "name".to_string(),
-                            terms: vec![
-                                Term::Var("P".to_string()),
-                                Term::Const("UavSystem".to_string()),
-                            ],
-                        },
-                    ],
-                },
-                expect: AssessmentExpectation::Exists,
-            },
-        ],
-    }
-}
-
-fn rotors_multiplicity_assessment_spec() -> AssessmentSpec {
-    AssessmentSpec {
-        id: "training.parts.1_2".to_string(),
-        title: "Rotor multiplicity".to_string(),
-        assertions: vec![
-            named_part_usage_assertion("has-rotors-part-usage", "Model declares a part usage named rotors"),
-            AssessmentAssertion {
-                id: "rotors-type".to_string(),
-                description: "rotors is typed by RotorAssembly".to_string(),
-                query: AssessmentQuery {
-                    find: vec!["U".to_string()],
-                    where_atoms: vec![
-                        Atom {
-                            predicate: "part_usage".to_string(),
-                            terms: vec![Term::Var("U".to_string())],
-                        },
-                        Atom {
-                            predicate: "name".to_string(),
-                            terms: vec![
-                                Term::Var("U".to_string()),
-                                Term::Const("rotors".to_string()),
-                            ],
-                        },
-                        Atom {
-                            predicate: "type".to_string(),
-                            terms: vec![
-                                Term::Var("U".to_string()),
-                                Term::Const("RotorAssembly".to_string()),
-                            ],
-                        },
-                    ],
-                },
-                expect: AssessmentExpectation::Exists,
-            },
-            AssessmentAssertion {
-                id: "rotors-multiplicity-six".to_string(),
-                description: "rotors has multiplicity 6".to_string(),
-                query: AssessmentQuery {
-                    find: vec!["U".to_string()],
-                    where_atoms: vec![
-                        Atom {
-                            predicate: "part_usage".to_string(),
-                            terms: vec![Term::Var("U".to_string())],
-                        },
-                        Atom {
-                            predicate: "name".to_string(),
-                            terms: vec![
-                                Term::Var("U".to_string()),
-                                Term::Const("rotors".to_string()),
-                            ],
-                        },
-                        Atom {
-                            predicate: "multiplicity".to_string(),
-                            terms: vec![
-                                Term::Var("U".to_string()),
-                                Term::Const("6".to_string()),
-                            ],
-                        },
-                    ],
-                },
-                expect: AssessmentExpectation::Exists,
-            },
-        ],
-    }
-}
-
-fn command_link_assessment_spec() -> AssessmentSpec {
-    AssessmentSpec {
-        id: "training.ports.1_3".to_string(),
-        title: "Command interface connection".to_string(),
-        assertions: vec![
-            AssessmentAssertion {
-                id: "has-interface-usage".to_string(),
-                description: "Model declares an interface usage".to_string(),
-                query: AssessmentQuery {
-                    find: vec!["I".to_string()],
-                    where_atoms: vec![Atom {
-                        predicate: "interface_usage".to_string(),
-                        terms: vec![Term::Var("I".to_string())],
-                    }],
-                },
-                expect: AssessmentExpectation::Exists,
-            },
-            AssessmentAssertion {
-                id: "controller-commandout-source".to_string(),
-                description: "controller.commandOut is the source endpoint".to_string(),
-                query: AssessmentQuery {
-                    find: vec!["C".to_string()],
-                    where_atoms: vec![
-                        Atom {
-                            predicate: "connected_source".to_string(),
-                            terms: vec![
-                                Term::Var("C".to_string()),
-                                Term::Const("controller::commandOut".to_string()),
-                            ],
-                        },
-                        Atom {
-                            predicate: "connected_target".to_string(),
-                            terms: vec![
-                                Term::Var("C".to_string()),
-                                Term::Const("rotor::commandIn".to_string()),
-                            ],
-                        },
-                    ],
-                },
-                expect: AssessmentExpectation::Exists,
-            },
-            AssessmentAssertion {
-                id: "rotor-commandin-target".to_string(),
-                description: "rotor.commandIn is the target endpoint".to_string(),
-                query: AssessmentQuery {
-                    find: vec!["C".to_string()],
-                    where_atoms: vec![
-                        Atom {
-                            predicate: "connected_source".to_string(),
-                            terms: vec![
-                                Term::Var("C".to_string()),
-                                Term::Const("controller::commandOut".to_string()),
-                            ],
-                        },
-                        Atom {
-                            predicate: "connected_target".to_string(),
-                            terms: vec![
-                                Term::Var("C".to_string()),
-                                Term::Const("rotor::commandIn".to_string()),
-                            ],
-                        },
-                    ],
-                },
-                expect: AssessmentExpectation::Exists,
-            },
-        ],
-    }
-}
-
-fn package_bindings(evaluation: &mercurio_core::Evaluation) -> Vec<String> {
-    let mut packages = evaluation
-        .facts()
-        .iter()
-        .filter_map(|fact| match (fact.predicate.as_str(), fact.terms.as_slice()) {
-            ("top_level_package", [package]) => Some(package.to_string()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    packages.sort();
-    packages
-}
-
-fn named_part_usage_assertion(id: &str, description: &str) -> AssessmentAssertion {
-    AssessmentAssertion {
-        id: id.to_string(),
-        description: description.to_string(),
-        query: AssessmentQuery {
-            find: vec!["U".to_string()],
-            where_atoms: vec![
-                Atom {
-                    predicate: "part_usage".to_string(),
-                    terms: vec![Term::Var("U".to_string())],
-                },
-                Atom {
-                    predicate: "name".to_string(),
-                    terms: vec![
-                        Term::Var("U".to_string()),
-                        Term::Const("rotors".to_string()),
-                    ],
-                },
-            ],
-        },
-        expect: AssessmentExpectation::Exists,
-    }
-}
-
-fn named_part_usage_id(evaluation: &mercurio_core::Evaluation, name: &str) -> Option<String> {
-    evaluation
-        .facts()
-        .iter()
-        .filter_map(|fact| match (fact.predicate.as_str(), fact.terms.as_slice()) {
-            ("name", [usage_id, usage_name]) if usage_name == name => Some(usage_id.clone()),
-            _ => None,
-        })
-        .find(|usage_id| evaluation.contains("part_usage", &[usage_id]))
-}
-
-fn first_interface_usage_id(evaluation: &mercurio_core::Evaluation) -> Option<String> {
-    evaluation
-        .facts()
-        .iter()
-        .find_map(|fact| match (fact.predicate.as_str(), fact.terms.as_slice()) {
-            ("interface_usage", [usage_id]) => Some(usage_id.clone()),
-            _ => None,
-        })
-}
-
-fn interface_usage_with_endpoints(
-    evaluation: &mercurio_core::Evaluation,
-    source: &str,
-    target: &str,
-) -> Option<String> {
-    evaluation
-        .facts()
-        .iter()
-        .filter_map(|fact| match (fact.predicate.as_str(), fact.terms.as_slice()) {
-            ("interface_usage", [usage_id]) => Some(usage_id.clone()),
-            _ => None,
-        })
-        .find(|usage_id| {
-            evaluation.contains("connected_source", &[usage_id, source])
-                && evaluation.contains("connected_target", &[usage_id, target])
-        })
-}
-
-fn fact_value(
-    evaluation: &mercurio_core::Evaluation,
-    predicate: &str,
-    subject: &str,
-) -> Option<String> {
-    evaluation
-        .facts()
-        .iter()
-        .find_map(|fact| match (fact.predicate.as_str(), fact.terms.as_slice()) {
-            (actual_predicate, [actual_subject, value])
-                if actual_predicate == predicate && actual_subject == subject =>
-            {
-                Some(value.clone())
-            }
-            _ => None,
-        })
+    predicates.sort();
+    predicates.dedup();
+    json!({
+        "factCount": facts.len(),
+        "predicates": predicates,
+        "items": facts,
+    })
 }
 
 fn snippet_diagnostic(diagnostic: &mercurio_core::frontend::diagnostics::Diagnostic) -> Value {
@@ -1401,6 +886,10 @@ fn default_source_name() -> String {
     "memory.sysml".to_string()
 }
 
+fn default_source_language() -> String {
+    "sysml".to_string()
+}
+
 fn run_runtime_query(runtime: &Runtime, query: RuntimeQuery) -> Result<Value, WasmError> {
     match query.kind {
         RuntimeQueryKind::Subtypes => {
@@ -1545,36 +1034,6 @@ mod tests {
             report.diagnostics
         );
         assert!(report.document.is_some());
-    }
-
-    #[test]
-    fn command_link_training_assessment_passes_for_expected_endpoints() {
-        let response = run_command_link_training_assessment(
-            "package Demo {
-                item def Command;
-                port def CommandPort { item command: Command; }
-                interface def CommandInterface {
-                    end controller: CommandPort;
-                    end rotor: CommandPort;
-                }
-                part def FlightComputer { port commandOut: CommandPort; }
-                part def RotorAssembly { port commandIn: CommandPort; }
-                part def UavSystem {
-                    part controller: FlightComputer;
-                    part rotor: RotorAssembly;
-                    interface motorCommandLink: CommandInterface
-                        connect controller.commandOut to rotor.commandIn;
-                }
-            }",
-            TrainingAssessmentRequest {
-                assessment_id: "interface-connection.command-link".to_string(),
-                filename: "ports.sysml".to_string(),
-                expected_package_count: None,
-            },
-        )
-        .unwrap();
-
-        assert_eq!(response.value.unwrap()["status"], "pass");
     }
 
     #[test]
