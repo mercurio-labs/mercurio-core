@@ -6,6 +6,7 @@ use serde_json::Value;
 use crate::authoring::{
     AuthoringModule, AuthoringProject, Declaration, MutationResult, QualifiedName,
 };
+use crate::graph::Graph;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ElementRef {
@@ -129,6 +130,7 @@ pub struct SemanticReasoningContext {
     pub focus: Vec<ElementRef>,
     pub elements: Vec<SemanticElementContext>,
     pub relationships: Vec<SemanticRelationshipContext>,
+    pub facts: Vec<SemanticFactContext>,
     pub source_files: Vec<String>,
     pub truncated: bool,
 }
@@ -147,6 +149,12 @@ pub struct SemanticRelationshipContext {
     pub kind: String,
     pub source: ElementRef,
     pub target: ElementRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticFactContext {
+    pub predicate: String,
+    pub terms: Vec<String>,
 }
 
 pub fn semantic_reasoning_context_from_authoring_project(
@@ -179,8 +187,71 @@ pub fn semantic_reasoning_context_from_authoring_project(
         focus,
         elements,
         relationships,
+        facts: Vec::new(),
         source_files,
         truncated,
+    }
+}
+
+pub fn enrich_semantic_reasoning_context_with_graph(
+    context: &mut SemanticReasoningContext,
+    graph: &Graph,
+    max_elements: usize,
+    max_facts: usize,
+) {
+    for element in graph.elements() {
+        if context.elements.len() >= max_elements {
+            context.truncated = true;
+            break;
+        }
+        if context
+            .elements
+            .iter()
+            .any(|item| item.element.qualified_name == element.element_id)
+        {
+            continue;
+        }
+        let mut attributes = element.properties.clone();
+        attributes.insert("kirKind".to_string(), Value::String(element.kind.clone()));
+        attributes.insert("kirLayer".to_string(), Value::from(element.layer));
+        context.elements.push(SemanticElementContext {
+            element: ElementRef::new(element.element_id.clone()),
+            kind: "kirElement".to_string(),
+            label: element
+                .properties
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(&element.element_id)
+                .to_string(),
+            owner: element
+                .properties
+                .get("owner")
+                .and_then(Value::as_str)
+                .map(ElementRef::new),
+            attributes,
+        });
+    }
+
+    for edge in graph.edges() {
+        let Some(source) = graph.element_id(edge.source) else {
+            continue;
+        };
+        let Some(target) = graph.element_id(edge.target) else {
+            continue;
+        };
+        context.relationships.push(SemanticRelationshipContext {
+            kind: format!("kir.{}", edge.relation),
+            source: ElementRef::new(source),
+            target: ElementRef::new(target),
+        });
+        if context.facts.len() < max_facts {
+            context.facts.push(SemanticFactContext {
+                predicate: edge.relation.clone(),
+                terms: vec![source.to_string(), target.to_string()],
+            });
+        } else {
+            context.truncated = true;
+        }
     }
 }
 
@@ -707,9 +778,12 @@ mod tests {
 
     use super::{
         ElementRef, WorkspaceRevision, default_semantic_mutation_capability_context,
+        enrich_semantic_reasoning_context_with_graph,
         semantic_reasoning_context_from_authoring_project,
     };
     use crate::authoring::AuthoringProject;
+    use crate::graph::Graph;
+    use crate::ir::{KirDocument, KirElement};
 
     #[test]
     fn default_capability_context_exposes_writable_sysml_v2_vocabulary() {
@@ -775,6 +849,63 @@ package HybridVehicle {
             relationship.kind == "typedBy"
                 && relationship.source.qualified_name == "HybridVehicle.HybridVehicle.battery"
                 && relationship.target.qualified_name == "BatteryPack"
+        }));
+    }
+
+    #[test]
+    fn semantic_reasoning_context_can_include_kir_graph_facts() {
+        let mut context = semantic_reasoning_context_from_authoring_project(
+            &AuthoringProject::default(),
+            WorkspaceRevision::unchecked(),
+            vec![ElementRef::new("type.Vehicle")],
+            64,
+        );
+        let graph = Graph::from_document(KirDocument {
+            metadata: BTreeMap::new(),
+            elements: vec![
+                KirElement {
+                    id: "type.Vehicle".to_string(),
+                    kind: "part_definition".to_string(),
+                    layer: 2,
+                    properties: BTreeMap::from([(
+                        "owned_feature".to_string(),
+                        serde_json::Value::String("feature.Vehicle.battery".to_string()),
+                    )]),
+                },
+                KirElement {
+                    id: "feature.Vehicle.battery".to_string(),
+                    kind: "part_usage".to_string(),
+                    layer: 2,
+                    properties: BTreeMap::from([(
+                        "owner".to_string(),
+                        serde_json::Value::String("type.Vehicle".to_string()),
+                    )]),
+                },
+            ],
+        })
+        .expect("graph builds");
+
+        enrich_semantic_reasoning_context_with_graph(&mut context, &graph, 64, 64);
+
+        assert!(
+            context
+                .elements
+                .iter()
+                .any(|item| item.element.qualified_name == "type.Vehicle"
+                    && item.kind == "kirElement")
+        );
+        assert!(context.relationships.iter().any(|relationship| {
+            relationship.kind == "kir.owned_feature"
+                && relationship.source.qualified_name == "type.Vehicle"
+                && relationship.target.qualified_name == "feature.Vehicle.battery"
+        }));
+        assert!(context.facts.iter().any(|fact| {
+            fact.predicate == "owned_feature"
+                && fact.terms
+                    == vec![
+                        "type.Vehicle".to_string(),
+                        "feature.Vehicle.battery".to_string(),
+                    ]
         }));
     }
 }
