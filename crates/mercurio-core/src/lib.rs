@@ -82,9 +82,11 @@ pub use metamodel::{
 pub use mutation::{
     ChangedAttribute, ChangedSpecialization, ElementRef, MovedElement, MutationApplicationResult,
     MutationEvidence, MutationPlan, MutationProposal, RelationshipChange, RenamedElement,
-    RetypedUsage, SemanticDiff, SemanticElementContext, SemanticExpression, SemanticFactContext,
-    SemanticMutation, SemanticMutationCapabilityContext, SemanticReasoningContext,
-    SemanticRelationshipContext, WorkspaceRevision, default_semantic_mutation_capability_context,
+    RetypedUsage, SemanticAffordanceContext, SemanticDiff, SemanticElementContext,
+    SemanticExpression, SemanticFactContext, SemanticMutation, SemanticMutationCapabilityContext,
+    SemanticReasoningContext, SemanticRelationshipContext, WorkspaceRevision,
+    default_semantic_mutation_capability_context,
+    enrich_semantic_reasoning_context_with_child_affordances,
     enrich_semantic_reasoning_context_with_graph,
     semantic_reasoning_context_from_authoring_project,
 };

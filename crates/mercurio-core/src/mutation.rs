@@ -131,6 +131,7 @@ pub struct SemanticReasoningContext {
     pub elements: Vec<SemanticElementContext>,
     pub relationships: Vec<SemanticRelationshipContext>,
     pub facts: Vec<SemanticFactContext>,
+    pub affordances: Vec<SemanticAffordanceContext>,
     pub source_files: Vec<String>,
     pub truncated: bool,
 }
@@ -155,6 +156,15 @@ pub struct SemanticRelationshipContext {
 pub struct SemanticFactContext {
     pub predicate: String,
     pub terms: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticAffordanceContext {
+    pub element: ElementRef,
+    pub operation: String,
+    pub child_kind: String,
+    pub status: String,
+    pub reason: Option<String>,
 }
 
 pub fn semantic_reasoning_context_from_authoring_project(
@@ -188,9 +198,112 @@ pub fn semantic_reasoning_context_from_authoring_project(
         elements,
         relationships,
         facts: Vec::new(),
+        affordances: Vec::new(),
         source_files,
         truncated,
     }
+}
+
+pub fn enrich_semantic_reasoning_context_with_child_affordances(
+    context: &mut SemanticReasoningContext,
+    max_affordances: usize,
+) {
+    let capability_context = default_semantic_mutation_capability_context();
+    let focus = context
+        .focus
+        .iter()
+        .map(|element| element.qualified_name.clone())
+        .collect::<BTreeSet<_>>();
+    let focused_only = !focus.is_empty();
+    let containers = context
+        .elements
+        .iter()
+        .filter(|element| {
+            (!focused_only || focus.contains(&element.element.qualified_name))
+                && semantic_element_can_own_children(element)
+        })
+        .map(|element| element.element.clone())
+        .collect::<Vec<_>>();
+
+    for element in containers {
+        push_child_affordance(
+            context,
+            max_affordances,
+            SemanticAffordanceContext {
+                element: element.clone(),
+                operation: "AddPackage".to_string(),
+                child_kind: "package".to_string(),
+                status: "candidate".to_string(),
+                reason: Some(
+                    "container-like elements can conservatively own nested packages".to_string(),
+                ),
+            },
+        );
+        for keyword in &capability_context.definition_keywords {
+            push_child_affordance(
+                context,
+                max_affordances,
+                SemanticAffordanceContext {
+                    element: element.clone(),
+                    operation: "AddDefinition".to_string(),
+                    child_kind: keyword.clone(),
+                    status: "candidate".to_string(),
+                    reason: Some(
+                        "candidate from core SysML v2 writable definition vocabulary; feasibility remains authoritative"
+                            .to_string(),
+                    ),
+                },
+            );
+        }
+        for keyword in &capability_context.usage_keywords {
+            push_child_affordance(
+                context,
+                max_affordances,
+                SemanticAffordanceContext {
+                    element: element.clone(),
+                    operation: "AddUsage".to_string(),
+                    child_kind: keyword.clone(),
+                    status: "candidate".to_string(),
+                    reason: Some(
+                        "candidate from core SysML v2 writable usage vocabulary; feasibility remains authoritative"
+                            .to_string(),
+                    ),
+                },
+            );
+        }
+    }
+}
+
+fn push_child_affordance(
+    context: &mut SemanticReasoningContext,
+    max_affordances: usize,
+    affordance: SemanticAffordanceContext,
+) {
+    if context.affordances.len() >= max_affordances {
+        context.truncated = true;
+        return;
+    }
+    context.affordances.push(affordance);
+}
+
+fn semantic_element_can_own_children(element: &SemanticElementContext) -> bool {
+    let kind = element.kind.to_ascii_lowercase();
+    if kind == "package" || kind == "definition" || kind == "usage" {
+        return true;
+    }
+    let Some(kir_kind) = element
+        .attributes
+        .get("kirKind")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase)
+    else {
+        return false;
+    };
+    kir_kind.contains("package")
+        || kir_kind.contains("definition")
+        || kir_kind.contains("usage")
+        || kir_kind.contains("type")
+        || kir_kind.contains("namespace")
 }
 
 pub fn enrich_semantic_reasoning_context_with_graph(
@@ -778,6 +891,7 @@ mod tests {
 
     use super::{
         ElementRef, WorkspaceRevision, default_semantic_mutation_capability_context,
+        enrich_semantic_reasoning_context_with_child_affordances,
         enrich_semantic_reasoning_context_with_graph,
         semantic_reasoning_context_from_authoring_project,
     };
@@ -849,6 +963,38 @@ package HybridVehicle {
             relationship.kind == "typedBy"
                 && relationship.source.qualified_name == "HybridVehicle.HybridVehicle.battery"
                 && relationship.target.qualified_name == "BatteryPack"
+        }));
+    }
+
+    #[test]
+    fn semantic_reasoning_context_exposes_focus_child_affordances() {
+        let files = BTreeMap::from([(
+            "hybrid.sysml".to_string(),
+            r#"
+package HybridVehicle {
+    part HybridVehicle;
+}
+"#
+            .to_string(),
+        )]);
+        let project = AuthoringProject::from_sysml_files(files).expect("project parses");
+        let mut context = semantic_reasoning_context_from_authoring_project(
+            &project,
+            WorkspaceRevision::unchecked(),
+            vec![ElementRef::new("HybridVehicle.HybridVehicle")],
+            64,
+        );
+
+        enrich_semantic_reasoning_context_with_child_affordances(&mut context, 64);
+
+        assert!(context.affordances.iter().any(|affordance| {
+            affordance.element.qualified_name == "HybridVehicle.HybridVehicle"
+                && affordance.operation == "AddUsage"
+                && affordance.child_kind == "part"
+                && affordance.status == "candidate"
+        }));
+        assert!(context.affordances.iter().all(|affordance| {
+            affordance.element.qualified_name == "HybridVehicle.HybridVehicle"
         }));
     }
 
