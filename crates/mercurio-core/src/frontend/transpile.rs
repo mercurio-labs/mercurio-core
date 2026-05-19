@@ -563,6 +563,7 @@ fn transpile_import(
 ) -> Result<KirElement, Diagnostic> {
     let metaclass = mappings.metaclass_for("Import")?;
     let emission = mappings.emission_for(metaclass)?;
+    let metatype_ref = Value::String(metaclass.to_string());
     let id = render_string(
         &emission.id_template,
         &BTreeMap::from([
@@ -578,6 +579,7 @@ fn transpile_import(
             Value::String(import.target_id.clone()),
         ),
         ("ordinal".to_string(), json!(import.ordinal)),
+        ("metatype_ref".to_string(), metatype_ref),
     ]);
 
     build_element(

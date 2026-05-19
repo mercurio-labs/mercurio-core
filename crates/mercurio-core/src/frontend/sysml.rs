@@ -3481,7 +3481,7 @@ mod tests {
     #[test]
     fn transpiles_package_and_usage_metatype_anchors() {
         let module = parse_sysml(
-            "package Demo { item def Payload; part def Vehicle { part engine: Engine; attribute status: Integer; item cargo: Payload; } part def Engine; }",
+            "package Demo { import SysML::*; item def Payload; part def Vehicle { part engine: Engine; attribute status: Integer; item cargo: Payload; } part def Engine; }",
         )
         .unwrap();
         let stdlib = fake_stdlib(["Integer", "SysML::Systems::PartDefinition"]);
@@ -3491,18 +3491,36 @@ mod tests {
 
         assert!(kir.elements.iter().any(|element| element.id == "pkg.Demo"));
         assert!(kir.elements.iter().any(|element| {
+            element.kind == "SysML::Import"
+                && element.properties.get("imports").is_some()
+                && element.properties.get("metatype")
+                    == Some(&serde_json::Value::String("SysML::Import".to_string()))
+        }));
+        assert!(kir.elements.iter().any(|element| {
             element.id == "feature.Demo.Vehicle.engine"
                 && element.kind == "SysML::PartUsage"
+                && element.properties.get("metatype")
+                    == Some(&serde_json::Value::String(
+                        "SysML::Systems::PartUsage".to_string(),
+                    ))
                 && element.properties.get("specializes").is_some()
         }));
         assert!(kir.elements.iter().any(|element| {
             element.id == "feature.Demo.Vehicle.status"
                 && element.kind == "SysML::AttributeUsage"
+                && element.properties.get("metatype")
+                    == Some(&serde_json::Value::String(
+                        "SysML::Systems::AttributeUsage".to_string(),
+                    ))
                 && element.properties.get("specializes").is_some()
         }));
         assert!(kir.elements.iter().any(|element| {
             element.id == "feature.Demo.Vehicle.cargo"
                 && element.kind == "SysML::ItemUsage"
+                && element.properties.get("metatype")
+                    == Some(&serde_json::Value::String(
+                        "SysML::Systems::ItemUsage".to_string(),
+                    ))
                 && element.properties.get("specializes").is_some()
         }));
     }

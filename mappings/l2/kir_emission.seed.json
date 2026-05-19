@@ -33,7 +33,8 @@
       "emit": {
         "properties": {
           "owner": "{owner_id}",
-          "imports": "{target_ref}"
+          "imports": "{target_ref}",
+          "metatype": "{metatype_ref}"
         }
       }
     },

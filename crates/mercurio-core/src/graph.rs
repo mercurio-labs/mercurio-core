@@ -256,4 +256,54 @@ mod tests {
             Some(&Value::String("type.Demo.Vehicle".to_string()))
         );
     }
+
+    #[test]
+    fn keeps_metatype_and_specialization_as_distinct_relations() {
+        let graph = Graph::from_document(KirDocument {
+            metadata: BTreeMap::new(),
+            elements: vec![
+                KirElement {
+                    id: "type.Camera".to_string(),
+                    kind: "SysML::Systems::PartDefinition".to_string(),
+                    layer: 2,
+                    properties: BTreeMap::from([
+                        (
+                            "metatype".to_string(),
+                            Value::String("SysML::Systems::PartDefinition".to_string()),
+                        ),
+                        (
+                            "specializes".to_string(),
+                            Value::Array(vec![Value::String("type.ImagingDevice".to_string())]),
+                        ),
+                    ]),
+                },
+                KirElement {
+                    id: "type.ImagingDevice".to_string(),
+                    kind: "SysML::Systems::PartDefinition".to_string(),
+                    layer: 2,
+                    properties: BTreeMap::new(),
+                },
+                KirElement {
+                    id: "SysML::Systems::PartDefinition".to_string(),
+                    kind: "Metaclass".to_string(),
+                    layer: 1,
+                    properties: BTreeMap::new(),
+                },
+            ],
+        })
+        .unwrap();
+
+        let camera_id = graph.node_id("type.Camera").unwrap();
+        let metatype_targets = graph
+            .outgoing(camera_id, "metatype")
+            .filter_map(|edge| graph.element_id(edge.target))
+            .collect::<Vec<_>>();
+        let specialization_targets = graph
+            .outgoing(camera_id, "specializes")
+            .filter_map(|edge| graph.element_id(edge.target))
+            .collect::<Vec<_>>();
+
+        assert_eq!(metatype_targets, vec!["SysML::Systems::PartDefinition"]);
+        assert_eq!(specialization_targets, vec!["type.ImagingDevice"]);
+    }
 }

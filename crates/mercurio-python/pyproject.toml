@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "mercurio-core-native"
+version = "0.1.0"
+description = "Native Python bindings for Mercurio core."
+requires-python = ">=3.10"
+license = "MIT"
+
+[tool.maturin]
+module-name = "mercurio_core_native"

@@ -1,0 +1,14 @@
+[package]
+name = "mercurio-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "mercurio_core_native"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+mercurio-core = { path = "../mercurio-core" }
+pyo3 = { workspace = true, features = ["extension-module"] }
+serde_json.workspace = true

@@ -10,7 +10,7 @@ package PictureTakingRequirements {
     text = "The system shall allow shooting only after the focus is set.";
   }
   
-  requirement Req3 {
+  requirement Req321 {
     id = "REQ-003";
     text = "The system shall save the taken picture.";
   }

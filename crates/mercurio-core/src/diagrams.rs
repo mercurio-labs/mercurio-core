@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, VecDeque};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -6,11 +7,16 @@ use serde_json::Value;
 use crate::graph::{Element, Graph, NodeId};
 use crate::metamodel::MetamodelAttributeRegistry;
 
+const DEFAULT_MAX_DEPTH: usize = 8;
+const DEFAULT_MAX_NODES: usize = 350;
+const DEFAULT_MAX_EDGES: usize = 900;
+const MAX_RELATION_FANOUT_PER_NODE: usize = 250;
+const TIMING_WARNING_THRESHOLD_MS: u128 = 250;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagramKindDto {
-    MetamodelSpecialization,
-    ElementSpecialization,
+    Structure,
     PackageTree,
     CompositionGraph,
     ReferenceGraph,
@@ -45,8 +51,12 @@ pub struct DiagramQueryOptionsDto {
     pub depth: usize,
     #[serde(default = "default_true")]
     pub include_libraries: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub include_user_model: bool,
+    #[serde(default = "default_max_nodes")]
+    pub max_nodes: usize,
+    #[serde(default = "default_max_edges")]
+    pub max_edges: usize,
 }
 
 impl Default for DiagramQueryOptionsDto {
@@ -56,7 +66,9 @@ impl Default for DiagramQueryOptionsDto {
             direction: DiagramDirectionDto::default(),
             depth: default_diagram_depth(),
             include_libraries: true,
-            include_user_model: false,
+            include_user_model: true,
+            max_nodes: default_max_nodes(),
+            max_edges: default_max_edges(),
         }
     }
 }
@@ -180,8 +192,7 @@ impl std::error::Error for DiagramError {}
 
 pub fn list_diagram_kinds() -> Vec<DiagramKindDto> {
     vec![
-        DiagramKindDto::MetamodelSpecialization,
-        DiagramKindDto::ElementSpecialization,
+        DiagramKindDto::Structure,
         DiagramKindDto::PackageTree,
         DiagramKindDto::CompositionGraph,
         DiagramKindDto::ReferenceGraph,
@@ -203,51 +214,69 @@ pub fn render_diagram(
     }
 
     match spec.kind {
-        DiagramKindDto::MetamodelSpecialization => {
-            render_specialization_diagram(graph, metamodel_registry, spec, true)
-        }
-        DiagramKindDto::ElementSpecialization => {
-            render_specialization_diagram(graph, metamodel_registry, spec, false)
-        }
+        DiagramKindDto::Structure => render_structure_diagram(graph, metamodel_registry, spec),
         _ => Err(DiagramError::UnsupportedKind(spec.kind)),
     }
 }
 
-fn render_specialization_diagram(
+fn render_structure_diagram(
     graph: &Graph,
     metamodel_registry: &MetamodelAttributeRegistry,
     spec: DiagramSpecDto,
-    metamodel_only: bool,
 ) -> Result<DiagramViewDto, DiagramError> {
+    let total_start = Instant::now();
+    let mut timings = Vec::new();
+    let mut warnings = Vec::new();
+
+    let root_start = Instant::now();
     let root = spec.root.as_deref().ok_or(DiagramError::MissingRoot)?;
     let root =
         resolve_root(graph, root).ok_or_else(|| DiagramError::RootNotFound(root.to_string()))?;
+    timings.push(("root", root_start.elapsed()));
+
+    let relation_start = Instant::now();
     let relations = if spec.query.relations.is_empty() {
         default_diagram_relations()
     } else {
         spec.query.relations.clone()
     };
-    let visible_ids = collect_specialization_ids(graph, root.id, &spec.query, &relations);
-    let mut warnings = Vec::new();
+    timings.push(("relations", relation_start.elapsed()));
 
-    let mut nodes = visible_ids
+    let traversal_start = Instant::now();
+    let traversal = collect_structure_ids(graph, root.id, &spec.query, &relations);
+    timings.push(("traversal", traversal_start.elapsed()));
+    warnings.extend(traversal.warnings);
+
+    let node_start = Instant::now();
+    let mut nodes = traversal.visible_ids
         .iter()
         .filter_map(|node_id| graph.element(*node_id))
-        .filter(|element| include_element(element, &spec.query, metamodel_only))
+        .filter(|element| include_element(element, &spec.query))
+        .take(effective_max_nodes(&spec.query))
         .map(|element| diagram_node(graph, metamodel_registry, element))
         .collect::<Vec<_>>();
     nodes.sort_by(|left, right| left.id.cmp(&right.id));
+    timings.push(("nodes", node_start.elapsed()));
 
     if nodes.is_empty() {
         warnings.push("No diagram nodes matched the requested filters.".to_string());
     }
+    if traversal.visible_ids.len() > nodes.len() {
+        warnings.push(format!(
+            "Diagram node limit reached; showing {} of {} traversed nodes.",
+            nodes.len(),
+            traversal.visible_ids.len()
+        ));
+    }
 
+    let edge_start = Instant::now();
     let retained_ids = nodes
         .iter()
         .map(|node| node.id.as_str())
         .collect::<BTreeSet<_>>();
     let mut edges = Vec::new();
-    for node_id in &visible_ids {
+    let max_edges = effective_max_edges(&spec.query);
+    'node_edges: for node_id in &traversal.visible_ids {
         for edge in graph.outgoing_edges(*node_id) {
             if !relations.iter().any(|relation| relation == &edge.relation) {
                 continue;
@@ -266,11 +295,28 @@ fn render_specialization_diagram(
                     relation: edge.relation.clone(),
                     label: edge.relation.clone(),
                 });
+                if edges.len() >= max_edges {
+                    warnings.push(format!(
+                        "Diagram edge limit reached; showing first {max_edges} matching edges."
+                    ));
+                    break 'node_edges;
+                }
             }
         }
     }
     edges.sort_by(|left, right| left.id.cmp(&right.id));
     edges.dedup_by(|left, right| left.id == right.id);
+    timings.push(("edges", edge_start.elapsed()));
+
+    timings.push(("total", total_start.elapsed()));
+    let slow_phases = timings
+        .iter()
+        .filter(|(_, elapsed)| elapsed.as_millis() >= TIMING_WARNING_THRESHOLD_MS)
+        .map(|(phase, elapsed)| format!("{phase}={}ms", elapsed.as_millis()))
+        .collect::<Vec<_>>();
+    if !slow_phases.is_empty() {
+        warnings.push(format!("Diagram render timing: {}.", slow_phases.join(", ")));
+    }
 
     Ok(DiagramViewDto {
         spec,
@@ -280,17 +326,40 @@ fn render_specialization_diagram(
     })
 }
 
-fn collect_specialization_ids(
+struct StructureTraversal {
+    visible_ids: BTreeSet<NodeId>,
+    warnings: Vec<String>,
+}
+
+fn collect_structure_ids(
     graph: &Graph,
     root_id: NodeId,
     query: &DiagramQueryOptionsDto,
     relations: &[String],
-) -> BTreeSet<NodeId> {
+) -> StructureTraversal {
     let mut visited = BTreeSet::new();
     let mut queue = VecDeque::from([(root_id, 0usize)]);
+    let mut warnings = Vec::new();
+    let max_depth = query.depth.min(DEFAULT_MAX_DEPTH);
+    let max_nodes = effective_max_nodes(query);
+    if query.depth > max_depth {
+        warnings.push(format!(
+            "Diagram depth limit reached; requested depth {} capped at {max_depth}.",
+            query.depth
+        ));
+    }
 
     while let Some((node_id, depth)) = queue.pop_front() {
-        if !visited.insert(node_id) || depth >= query.depth {
+        if !visited.insert(node_id) {
+            continue;
+        }
+        if visited.len() >= max_nodes {
+            warnings.push(format!(
+                "Diagram traversal node limit reached at {max_nodes} nodes."
+            ));
+            break;
+        }
+        if depth >= max_depth {
             continue;
         }
 
@@ -299,8 +368,13 @@ fn collect_specialization_ids(
             DiagramDirectionDto::Parents | DiagramDirectionDto::Both
         ) {
             for relation in relations {
-                for edge in graph.outgoing(node_id, relation) {
+                for edge in graph.outgoing(node_id, relation).take(MAX_RELATION_FANOUT_PER_NODE) {
                     queue.push_back((edge.target, depth + 1));
+                }
+                if graph.outgoing(node_id, relation).count() > MAX_RELATION_FANOUT_PER_NODE {
+                    warnings.push(format!(
+                        "Diagram relation fan-out limit reached for `{relation}`."
+                    ));
                 }
             }
         }
@@ -310,14 +384,22 @@ fn collect_specialization_ids(
             DiagramDirectionDto::Children | DiagramDirectionDto::Both
         ) {
             for relation in relations {
-                for edge in graph.incoming(node_id, relation) {
+                for edge in graph.incoming(node_id, relation).take(MAX_RELATION_FANOUT_PER_NODE) {
                     queue.push_back((edge.source, depth + 1));
+                }
+                if graph.incoming(node_id, relation).count() > MAX_RELATION_FANOUT_PER_NODE {
+                    warnings.push(format!(
+                        "Diagram relation fan-out limit reached for incoming `{relation}`."
+                    ));
                 }
             }
         }
     }
 
-    visited
+    StructureTraversal {
+        visible_ids: visited,
+        warnings,
+    }
 }
 
 fn resolve_root<'a>(graph: &'a Graph, root: &str) -> Option<&'a Element> {
@@ -344,12 +426,7 @@ fn resolve_root<'a>(graph: &'a Graph, root: &str) -> Option<&'a Element> {
 fn include_element(
     element: &Element,
     query: &DiagramQueryOptionsDto,
-    metamodel_only: bool,
 ) -> bool {
-    if metamodel_only {
-        return element.layer < 2 && query.include_libraries;
-    }
-
     if element.layer < 2 {
         return query.include_libraries;
     }
@@ -406,6 +483,22 @@ fn default_diagram_relations() -> Vec<String> {
 
 fn default_diagram_depth() -> usize {
     3
+}
+
+fn default_max_nodes() -> usize {
+    DEFAULT_MAX_NODES
+}
+
+fn default_max_edges() -> usize {
+    DEFAULT_MAX_EDGES
+}
+
+fn effective_max_nodes(query: &DiagramQueryOptionsDto) -> usize {
+    query.max_nodes.clamp(1, DEFAULT_MAX_NODES)
+}
+
+fn effective_max_edges(query: &DiagramQueryOptionsDto) -> usize {
+    query.max_edges.clamp(1, DEFAULT_MAX_EDGES)
 }
 
 fn default_layout_engine() -> String {
