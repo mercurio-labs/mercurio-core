@@ -218,6 +218,14 @@ pub struct LibraryTreeNodeDto {
     pub children: Vec<LibraryTreeNodeDto>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SearchResultDto {
+    pub id: String,
+    pub label: String,
+    pub kind: String,
+    pub layer: u8,
+}
+
 pub fn graph_view(graph: &Graph, scope: GraphScope) -> GraphDto {
     let visible_ids = collect_graph_scope_ids(graph, scope);
     let mut nodes = graph
@@ -271,6 +279,28 @@ pub fn element_details(
         inbound,
         outbound,
     ))
+}
+
+pub fn search_view(graph: &Graph, query: &str) -> Vec<SearchResultDto> {
+    let query = query.trim().to_ascii_lowercase();
+    let mut results = graph
+        .elements()
+        .iter()
+        .map(|element| SearchResultDto {
+            id: element.element_id.clone(),
+            label: label_for_id(&element.element_id),
+            kind: element.kind.clone(),
+            layer: element.layer,
+        })
+        .filter(|entry| {
+            query.is_empty()
+                || entry.id.to_ascii_lowercase().contains(&query)
+                || entry.kind.to_ascii_lowercase().contains(&query)
+                || entry.label.to_ascii_lowercase().contains(&query)
+        })
+        .collect::<Vec<_>>();
+    results.sort_by(|left, right| left.id.cmp(&right.id));
+    results
 }
 
 pub fn metatype_explorer_view(
@@ -1063,7 +1093,8 @@ mod tests {
 
     use super::{
         element_details, graph_view, l2_explorer_view, library_tree_view, metatype_explorer_view,
-        requirements_table_view, GraphScope, L2ExplorerRequestDto, MetatypeExplorerRequestDto,
+        requirements_table_view, search_view, GraphScope, L2ExplorerRequestDto,
+        MetatypeExplorerRequestDto,
     };
 
     #[test]
@@ -1134,6 +1165,41 @@ mod tests {
         assert_eq!(l2_plus_context.nodes.len(), 2);
         assert_eq!(l2_plus_context.edges.len(), 1);
         assert_eq!(l2_plus_context.edges[0].relation, "metatype");
+    }
+
+    #[test]
+    fn search_view_matches_by_id_kind_and_label() {
+        let graph = Graph::from_document(KirDocument {
+            metadata: BTreeMap::new(),
+            elements: vec![
+                KirElement {
+                    id: "type.Vehicle".to_string(),
+                    kind: "SysML::Systems::PartDefinition".to_string(),
+                    layer: 2,
+                    properties: BTreeMap::new(),
+                },
+                KirElement {
+                    id: "feature.Vehicle.engine".to_string(),
+                    kind: "SysML::Systems::PartUsage".to_string(),
+                    layer: 2,
+                    properties: BTreeMap::new(),
+                },
+            ],
+        })
+        .unwrap();
+
+        let by_label = search_view(&graph, "engine");
+        let by_kind = search_view(&graph, "partdefinition");
+        let all = search_view(&graph, "  ");
+
+        assert_eq!(by_label.len(), 1);
+        assert_eq!(by_label[0].id, "feature.Vehicle.engine");
+        assert_eq!(by_kind.len(), 1);
+        assert_eq!(by_kind[0].id, "type.Vehicle");
+        assert_eq!(
+            all.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+            vec!["feature.Vehicle.engine", "type.Vehicle"]
+        );
     }
 
     #[test]

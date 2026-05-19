@@ -134,7 +134,7 @@ pub use views::{
     InheritedPropertyValueDto, L2ExplorerEdgeDto, L2ExplorerGraphDto, L2ExplorerNodeDto,
     L2ExplorerRequestDto, LibraryTreeNodeDto, MetatypeExplorerEdgeDto, MetatypeExplorerGraphDto,
     MetatypeExplorerNodeDto, MetatypeExplorerRequestDto, RequirementSourceDto,
-    RequirementTableColumnDto, RequirementTableRowDto, RequirementTableViewDto, element_details,
-    graph_view, l2_explorer_view, library_tree_view, library_tree_view_from_document,
-    metatype_explorer_view, requirements_table_view,
+    RequirementTableColumnDto, RequirementTableRowDto, RequirementTableViewDto, SearchResultDto,
+    element_details, graph_view, l2_explorer_view, library_tree_view,
+    library_tree_view_from_document, metatype_explorer_view, requirements_table_view, search_view,
 };
