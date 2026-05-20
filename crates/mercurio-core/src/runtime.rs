@@ -7,7 +7,7 @@ use crate::datalog::{
     DatalogError, DerivedIndexes, RulePack, load_default_rulepacks, materialize_core_indexes,
 };
 use crate::expression::{
-    BinaryExpressionOp, ExpressionIr, ExpressionPathRoot, ExpressionPathSegment, UnaryExpressionOp,
+    ExpressionEvaluationContext, ExpressionEvaluationError, ExpressionIr, ExpressionPathSegment,
 };
 use crate::graph::{Graph, GraphError};
 use crate::ir::KirDocument;
@@ -71,6 +71,25 @@ impl From<GraphError> for RuntimeError {
 impl From<DatalogError> for RuntimeError {
     fn from(value: DatalogError) -> Self {
         Self::Datalog(value)
+    }
+}
+
+impl From<ExpressionEvaluationError> for RuntimeError {
+    fn from(value: ExpressionEvaluationError) -> Self {
+        match value {
+            ExpressionEvaluationError::InvalidExpression(expression) => {
+                Self::InvalidExpression(expression)
+            }
+            ExpressionEvaluationError::UnsupportedAggregation { expression } => {
+                Self::UnsupportedAggregation(expression)
+            }
+            ExpressionEvaluationError::UnsupportedFunction { .. } => {
+                Self::InvalidExpression(value.to_string())
+            }
+            ExpressionEvaluationError::NonNumericValue { owner, feature } => {
+                Self::NonNumericValue { owner, feature }
+            }
+        }
     }
 }
 
@@ -258,99 +277,14 @@ impl Runtime {
     ) -> Result<Value, RuntimeError> {
         let expression_ir = ExpressionIr::from_value(expression)
             .map_err(|err| RuntimeError::InvalidExpression(format!("{err}: {expression}")))?;
-        self.evaluate_typed_expression_ir(&expression_ir, owner_id, context)
-    }
-
-    fn evaluate_typed_expression_ir(
-        &self,
-        expression: &ExpressionIr,
-        owner_id: &str,
-        context: &ExecutionContext,
-    ) -> Result<Value, RuntimeError> {
-        match expression {
-            ExpressionIr::Literal { value } => Ok(value.clone()),
-            ExpressionIr::SelfRef => Ok(Value::String(owner_id.to_string())),
-            ExpressionIr::Tuple { items } => {
-                let values = items
-                    .iter()
-                    .map(|item| self.evaluate_typed_expression_ir(item, owner_id, context))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(Value::Array(values))
-            }
-            ExpressionIr::Path { .. } => {
-                let values = self.resolve_path_expression(owner_id, expression, context)?;
-                match values.as_slice() {
-                    [value] => Ok(value.clone()),
-                    _ => Ok(Value::Array(values)),
-                }
-            }
-            ExpressionIr::Unary { op, expr } => {
-                let value = self.evaluate_typed_expression_ir(expr, owner_id, context)?;
-                match op {
-                    UnaryExpressionOp::Negate => {
-                        let number = value_as_f64(&value, format!("{expression:?}"))?;
-                        Number::from_f64(-number).map(Value::Number).ok_or_else(|| {
-                            RuntimeError::UnsupportedAggregation(format!("{expression:?}"))
-                        })
-                    }
-                    UnaryExpressionOp::Not => {
-                        let boolean = value.as_bool().ok_or_else(|| {
-                            RuntimeError::InvalidExpression(format!("{expression:?}"))
-                        })?;
-                        Ok(Value::Bool(!boolean))
-                    }
-                }
-            }
-            ExpressionIr::Binary { left, op, right } => {
-                let left = self.evaluate_typed_expression_ir(left, owner_id, context)?;
-                let right = self.evaluate_typed_expression_ir(right, owner_id, context)?;
-                evaluate_binary_expression(*op, &left, &right, format!("{expression:?}"))
-            }
-            ExpressionIr::Call { function, args } => {
-                if args.len() != 1 {
-                    return Err(RuntimeError::InvalidExpression(format!("{expression:?}")));
-                }
-
-                let values = match args.first() {
-                    Some(ExpressionIr::Path { .. }) => {
-                        self.resolve_path_expression(owner_id, args.first().unwrap(), context)?
-                    }
-                    Some(arg) => vec![self.evaluate_typed_expression_ir(arg, owner_id, context)?],
-                    None => return Err(RuntimeError::InvalidExpression(format!("{expression:?}"))),
-                };
-
-                match function.as_str() {
-                    "count" => Ok(Value::Number(Number::from(values.len() as u64))),
-                    "sum" => {
-                        let mut total = 0.0_f64;
-                        for value in values {
-                            match value {
-                                Value::Number(number) => {
-                                    total += number.as_f64().ok_or_else(|| {
-                                        RuntimeError::UnsupportedAggregation(format!(
-                                            "{expression:?}"
-                                        ))
-                                    })?;
-                                }
-                                _ => {
-                                    return Err(RuntimeError::NonNumericValue {
-                                        owner: owner_id.to_string(),
-                                        feature: format!("{expression:?}"),
-                                    });
-                                }
-                            }
-                        }
-                        let number = Number::from_f64(total).ok_or_else(|| {
-                            RuntimeError::UnsupportedAggregation(format!("{expression:?}"))
-                        })?;
-                        Ok(Value::Number(number))
-                    }
-                    _ => Err(RuntimeError::InvalidExpression(format!(
-                        "unsupported expression_ir function `{function}`: {expression:?}"
-                    ))),
-                }
-            }
-        }
+        let mut evaluation_context = RuntimeExpressionEvaluationContext {
+            runtime: self,
+            owner_id,
+            context,
+        };
+        expression_ir
+            .evaluate(&mut evaluation_context)
+            .map_err(RuntimeError::from)
     }
 
     fn resolve_path(
@@ -365,28 +299,6 @@ impl Runtime {
         }
 
         self.resolve_path_segments(owner_id, &segments[1..], context)
-    }
-
-    fn resolve_path_expression(
-        &self,
-        owner_id: &str,
-        expression: &ExpressionIr,
-        context: &ExecutionContext,
-    ) -> Result<Vec<Value>, RuntimeError> {
-        let ExpressionIr::Path { root, segments } = expression else {
-            return Err(RuntimeError::InvalidExpression(format!("{expression:?}")));
-        };
-        if *root != ExpressionPathRoot::SelfRef {
-            return Err(RuntimeError::InvalidExpression(format!("{expression:?}")));
-        }
-        let owned = segments
-            .iter()
-            .map(ExpressionPathSegment::name)
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-
-        let borrowed = owned.iter().map(String::as_str).collect::<Vec<_>>();
-        self.resolve_path_segments(owner_id, &borrowed, context)
     }
 
     fn resolve_path_segments(
@@ -554,72 +466,31 @@ fn push_unique(values: &mut Vec<String>, value: String) {
     }
 }
 
-fn evaluate_binary_expression(
-    op: BinaryExpressionOp,
-    left: &Value,
-    right: &Value,
-    expression: String,
-) -> Result<Value, RuntimeError> {
-    match op {
-        BinaryExpressionOp::Add => numeric_binary(left, right, expression, |a, b| a + b),
-        BinaryExpressionOp::Subtract => numeric_binary(left, right, expression, |a, b| a - b),
-        BinaryExpressionOp::Multiply => numeric_binary(left, right, expression, |a, b| a * b),
-        BinaryExpressionOp::Divide => numeric_binary(left, right, expression, |a, b| a / b),
-        BinaryExpressionOp::Power => numeric_binary(left, right, expression, f64::powf),
-        BinaryExpressionOp::Less => numeric_compare(left, right, expression, |a, b| a < b),
-        BinaryExpressionOp::LessEqual => numeric_compare(left, right, expression, |a, b| a <= b),
-        BinaryExpressionOp::Greater => numeric_compare(left, right, expression, |a, b| a > b),
-        BinaryExpressionOp::GreaterEqual => numeric_compare(left, right, expression, |a, b| a >= b),
-        BinaryExpressionOp::Equal => Ok(Value::Bool(left == right)),
-        BinaryExpressionOp::NotEqual => Ok(Value::Bool(left != right)),
-        BinaryExpressionOp::And => boolean_binary(left, right, expression, |a, b| a && b),
-        BinaryExpressionOp::Or => boolean_binary(left, right, expression, |a, b| a || b),
+struct RuntimeExpressionEvaluationContext<'a> {
+    runtime: &'a Runtime,
+    owner_id: &'a str,
+    context: &'a ExecutionContext,
+}
+
+impl ExpressionEvaluationContext for RuntimeExpressionEvaluationContext<'_> {
+    fn owner_id(&self) -> &str {
+        self.owner_id
     }
-}
 
-fn numeric_binary(
-    left: &Value,
-    right: &Value,
-    expression: String,
-    op: impl FnOnce(f64, f64) -> f64,
-) -> Result<Value, RuntimeError> {
-    let left = value_as_f64(left, expression.clone())?;
-    let right = value_as_f64(right, expression.clone())?;
-    Number::from_f64(op(left, right))
-        .map(Value::Number)
-        .ok_or(RuntimeError::UnsupportedAggregation(expression))
-}
-
-fn numeric_compare(
-    left: &Value,
-    right: &Value,
-    expression: String,
-    op: impl FnOnce(f64, f64) -> bool,
-) -> Result<Value, RuntimeError> {
-    let left = value_as_f64(left, expression.clone())?;
-    let right = value_as_f64(right, expression)?;
-    Ok(Value::Bool(op(left, right)))
-}
-
-fn boolean_binary(
-    left: &Value,
-    right: &Value,
-    expression: String,
-    op: impl FnOnce(bool, bool) -> bool,
-) -> Result<Value, RuntimeError> {
-    let left = left
-        .as_bool()
-        .ok_or_else(|| RuntimeError::InvalidExpression(expression.clone()))?;
-    let right = right
-        .as_bool()
-        .ok_or_else(|| RuntimeError::InvalidExpression(expression.clone()))?;
-    Ok(Value::Bool(op(left, right)))
-}
-
-fn value_as_f64(value: &Value, expression: String) -> Result<f64, RuntimeError> {
-    value
-        .as_f64()
-        .ok_or(RuntimeError::UnsupportedAggregation(expression))
+    fn resolve_path(
+        &mut self,
+        segments: &[ExpressionPathSegment],
+    ) -> Result<Vec<Value>, ExpressionEvaluationError> {
+        let owned = segments
+            .iter()
+            .map(ExpressionPathSegment::name)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let borrowed = owned.iter().map(String::as_str).collect::<Vec<_>>();
+        self.runtime
+            .resolve_path_segments(self.owner_id, &borrowed, self.context)
+            .map_err(|err| ExpressionEvaluationError::InvalidExpression(err.to_string()))
+    }
 }
 
 fn parse_function<'a>(expression: &'a str, function: &str) -> Option<&'a str> {

@@ -57,8 +57,8 @@ pub use diagrams::{
     DiagramSpecDto, DiagramStyleOptionsDto, DiagramViewDto, list_diagram_kinds, render_diagram,
 };
 pub use expression::{
-    BinaryExpressionOp, ExpressionIr, ExpressionIrError, ExpressionPathRoot, ExpressionPathSegment,
-    UnaryExpressionOp,
+    BinaryExpressionOp, ExpressionEvaluationContext, ExpressionEvaluationError, ExpressionIr,
+    ExpressionIrError, ExpressionPathRoot, ExpressionPathSegment, UnaryExpressionOp,
 };
 pub use feasibility::{
     AttributePolicyAnswer, CapabilityAnswer, ConservativeSemanticCapabilityOracle,

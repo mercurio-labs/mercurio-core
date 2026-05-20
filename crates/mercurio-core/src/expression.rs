@@ -1,7 +1,7 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Number, Value};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -133,16 +133,270 @@ impl ExpressionIr {
     pub fn to_value(&self) -> Result<Value, ExpressionIrError> {
         serde_json::to_value(self).map_err(|err| ExpressionIrError::Invalid(err.to_string()))
     }
+
+    pub fn evaluate(
+        &self,
+        context: &mut impl ExpressionEvaluationContext,
+    ) -> Result<Value, ExpressionEvaluationError> {
+        match self {
+            Self::Literal { value } => Ok(value.clone()),
+            Self::SelfRef => Ok(Value::String(context.owner_id().to_string())),
+            Self::Tuple { items } => {
+                let values = items
+                    .iter()
+                    .map(|item| item.evaluate(context))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Value::Array(values))
+            }
+            Self::Path { segments, .. } => {
+                let values = context.resolve_path(segments)?;
+                match values.as_slice() {
+                    [value] => Ok(value.clone()),
+                    _ => Ok(Value::Array(values)),
+                }
+            }
+            Self::Unary { op, expr } => {
+                let value = expr.evaluate(context)?;
+                match op {
+                    UnaryExpressionOp::Negate => {
+                        let number = value_as_f64(&value, self)?;
+                        Number::from_f64(-number).map(Value::Number).ok_or_else(|| {
+                            ExpressionEvaluationError::UnsupportedAggregation {
+                                expression: format!("{self:?}"),
+                            }
+                        })
+                    }
+                    UnaryExpressionOp::Not => {
+                        let boolean = value.as_bool().ok_or_else(|| {
+                            ExpressionEvaluationError::InvalidExpression(format!("{self:?}"))
+                        })?;
+                        Ok(Value::Bool(!boolean))
+                    }
+                }
+            }
+            Self::Binary { left, op, right } => {
+                let left = left.evaluate(context)?;
+                let right = right.evaluate(context)?;
+                evaluate_binary_expression(*op, &left, &right, self)
+            }
+            Self::Call { function, args } => {
+                if args.len() != 1 {
+                    return Err(ExpressionEvaluationError::InvalidExpression(format!(
+                        "{self:?}"
+                    )));
+                }
+
+                let values = match args.first() {
+                    Some(Self::Path { segments, .. }) => context.resolve_path(segments)?,
+                    Some(arg) => vec![arg.evaluate(context)?],
+                    None => {
+                        return Err(ExpressionEvaluationError::InvalidExpression(format!(
+                            "{self:?}"
+                        )));
+                    }
+                };
+
+                match function.as_str() {
+                    "count" => Ok(Value::Number(Number::from(values.len() as u64))),
+                    "sum" => {
+                        let mut total = 0.0_f64;
+                        for value in values {
+                            match value {
+                                Value::Number(number) => {
+                                    total += number.as_f64().ok_or_else(|| {
+                                        ExpressionEvaluationError::UnsupportedAggregation {
+                                            expression: format!("{self:?}"),
+                                        }
+                                    })?;
+                                }
+                                _ => {
+                                    return Err(ExpressionEvaluationError::NonNumericValue {
+                                        owner: context.owner_id().to_string(),
+                                        feature: format!("{self:?}"),
+                                    });
+                                }
+                            }
+                        }
+                        let number = Number::from_f64(total).ok_or_else(|| {
+                            ExpressionEvaluationError::UnsupportedAggregation {
+                                expression: format!("{self:?}"),
+                            }
+                        })?;
+                        Ok(Value::Number(number))
+                    }
+                    _ => Err(ExpressionEvaluationError::UnsupportedFunction {
+                        function: function.clone(),
+                        expression: format!("{self:?}"),
+                    }),
+                }
+            }
+        }
+    }
+}
+
+pub trait ExpressionEvaluationContext {
+    fn owner_id(&self) -> &str;
+
+    fn resolve_path(
+        &mut self,
+        segments: &[ExpressionPathSegment],
+    ) -> Result<Vec<Value>, ExpressionEvaluationError>;
+}
+
+#[derive(Debug)]
+pub enum ExpressionEvaluationError {
+    InvalidExpression(String),
+    UnsupportedAggregation {
+        expression: String,
+    },
+    UnsupportedFunction {
+        function: String,
+        expression: String,
+    },
+    NonNumericValue {
+        owner: String,
+        feature: String,
+    },
+}
+
+impl fmt::Display for ExpressionEvaluationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidExpression(expression) => write!(f, "invalid expression: {expression}"),
+            Self::UnsupportedAggregation { expression } => {
+                write!(f, "unsupported aggregation expression: {expression}")
+            }
+            Self::UnsupportedFunction {
+                function,
+                expression,
+            } => write!(
+                f,
+                "unsupported expression_ir function `{function}`: {expression}"
+            ),
+            Self::NonNumericValue { owner, feature } => {
+                write!(
+                    f,
+                    "non-numeric value encountered while reading {feature} from {owner}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ExpressionEvaluationError {}
+
+fn evaluate_binary_expression(
+    op: BinaryExpressionOp,
+    left: &Value,
+    right: &Value,
+    expression: &ExpressionIr,
+) -> Result<Value, ExpressionEvaluationError> {
+    match op {
+        BinaryExpressionOp::Add => numeric_binary(left, right, expression, |a, b| a + b),
+        BinaryExpressionOp::Subtract => numeric_binary(left, right, expression, |a, b| a - b),
+        BinaryExpressionOp::Multiply => numeric_binary(left, right, expression, |a, b| a * b),
+        BinaryExpressionOp::Divide => numeric_binary(left, right, expression, |a, b| a / b),
+        BinaryExpressionOp::Power => numeric_binary(left, right, expression, f64::powf),
+        BinaryExpressionOp::Less => numeric_compare(left, right, expression, |a, b| a < b),
+        BinaryExpressionOp::LessEqual => numeric_compare(left, right, expression, |a, b| a <= b),
+        BinaryExpressionOp::Greater => numeric_compare(left, right, expression, |a, b| a > b),
+        BinaryExpressionOp::GreaterEqual => numeric_compare(left, right, expression, |a, b| a >= b),
+        BinaryExpressionOp::Equal => Ok(Value::Bool(left == right)),
+        BinaryExpressionOp::NotEqual => Ok(Value::Bool(left != right)),
+        BinaryExpressionOp::And => boolean_binary(left, right, expression, |a, b| a && b),
+        BinaryExpressionOp::Or => boolean_binary(left, right, expression, |a, b| a || b),
+    }
+}
+
+fn numeric_binary(
+    left: &Value,
+    right: &Value,
+    expression: &ExpressionIr,
+    op: impl FnOnce(f64, f64) -> f64,
+) -> Result<Value, ExpressionEvaluationError> {
+    let left = value_as_f64(left, expression)?;
+    let right = value_as_f64(right, expression)?;
+    Number::from_f64(op(left, right))
+        .map(Value::Number)
+        .ok_or_else(|| ExpressionEvaluationError::UnsupportedAggregation {
+            expression: format!("{expression:?}"),
+        })
+}
+
+fn numeric_compare(
+    left: &Value,
+    right: &Value,
+    expression: &ExpressionIr,
+    op: impl FnOnce(f64, f64) -> bool,
+) -> Result<Value, ExpressionEvaluationError> {
+    let left = value_as_f64(left, expression)?;
+    let right = value_as_f64(right, expression)?;
+    Ok(Value::Bool(op(left, right)))
+}
+
+fn boolean_binary(
+    left: &Value,
+    right: &Value,
+    expression: &ExpressionIr,
+    op: impl FnOnce(bool, bool) -> bool,
+) -> Result<Value, ExpressionEvaluationError> {
+    let left = left
+        .as_bool()
+        .ok_or_else(|| ExpressionEvaluationError::InvalidExpression(format!("{expression:?}")))?;
+    let right = right
+        .as_bool()
+        .ok_or_else(|| ExpressionEvaluationError::InvalidExpression(format!("{expression:?}")))?;
+    Ok(Value::Bool(op(left, right)))
+}
+
+fn value_as_f64(
+    value: &Value,
+    expression: &ExpressionIr,
+) -> Result<f64, ExpressionEvaluationError> {
+    value
+        .as_f64()
+        .ok_or_else(|| ExpressionEvaluationError::UnsupportedAggregation {
+            expression: format!("{expression:?}"),
+        })
 }
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    use serde_json::{Value, json};
 
     use super::{
-        BinaryExpressionOp, ExpressionIr, ExpressionPathRoot, ExpressionPathSegment,
-        UnaryExpressionOp,
+        BinaryExpressionOp, ExpressionEvaluationContext, ExpressionEvaluationError, ExpressionIr,
+        ExpressionPathRoot, ExpressionPathSegment, UnaryExpressionOp,
     };
+
+    #[derive(Default)]
+    struct TestEvaluationContext {
+        owner_id: String,
+        paths: BTreeMap<Vec<String>, Vec<Value>>,
+    }
+
+    impl ExpressionEvaluationContext for TestEvaluationContext {
+        fn owner_id(&self) -> &str {
+            &self.owner_id
+        }
+
+        fn resolve_path(
+            &mut self,
+            segments: &[ExpressionPathSegment],
+        ) -> Result<Vec<Value>, ExpressionEvaluationError> {
+            let key = segments
+                .iter()
+                .map(ExpressionPathSegment::name)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            self.paths
+                .get(&key)
+                .cloned()
+                .ok_or_else(|| ExpressionEvaluationError::InvalidExpression(key.join(".")))
+        }
+    }
 
     #[test]
     fn serializes_expression_ir_contract_shapes() {
@@ -226,5 +480,66 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error.to_string(), "unsupported expression_ir kind `select`");
+    }
+
+    #[test]
+    fn evaluates_pure_expression_ir_with_path_callback() {
+        let mut context = TestEvaluationContext {
+            owner_id: "assembly.Vehicle".to_string(),
+            paths: [(
+                vec!["parts".to_string(), "mass".to_string()],
+                vec![json!(4.0), json!(6.5)],
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let expression = ExpressionIr::Binary {
+            left: Box::new(ExpressionIr::Call {
+                function: "sum".to_string(),
+                args: vec![ExpressionIr::Path {
+                    root: ExpressionPathRoot::SelfRef,
+                    segments: vec![
+                        ExpressionPathSegment::Name("parts".to_string()),
+                        ExpressionPathSegment::Name("mass".to_string()),
+                    ],
+                }],
+            }),
+            op: BinaryExpressionOp::Greater,
+            right: Box::new(ExpressionIr::Literal { value: json!(10) }),
+        };
+
+        assert_eq!(expression.evaluate(&mut context).unwrap(), json!(true));
+    }
+
+    #[test]
+    fn reports_nonnumeric_sum_values_from_shared_evaluator() {
+        let mut context = TestEvaluationContext {
+            owner_id: "assembly.Vehicle".to_string(),
+            paths: [(
+                vec!["parts".to_string(), "mass".to_string()],
+                vec![json!(4.0), json!("heavy")],
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let expression = ExpressionIr::Call {
+            function: "sum".to_string(),
+            args: vec![ExpressionIr::Path {
+                root: ExpressionPathRoot::SelfRef,
+                segments: vec![
+                    ExpressionPathSegment::Name("parts".to_string()),
+                    ExpressionPathSegment::Name("mass".to_string()),
+                ],
+            }],
+        };
+
+        let error = expression.evaluate(&mut context).unwrap_err();
+        assert!(matches!(
+            error,
+            ExpressionEvaluationError::NonNumericValue {
+                owner,
+                ..
+            } if owner == "assembly.Vehicle"
+        ));
     }
 }
