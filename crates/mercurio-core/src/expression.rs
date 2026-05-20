@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -154,7 +155,7 @@ impl ExpressionIr {
             return Err(ExpressionIrError::UnsupportedKind(kind.to_string()));
         }
 
-        serde_json::from_value(value.clone())
+        serde_json::from_value(normalize_expression_ir_value(value))
             .map_err(|err| ExpressionIrError::Invalid(err.to_string()))
     }
 
@@ -201,6 +202,63 @@ impl ExpressionIr {
                 }
                 args[0].validate_runtime_supported()
             }
+        }
+    }
+
+    pub fn render_constraint_expression(&self) -> String {
+        match self {
+            Self::Literal { value } => render_literal_value(value),
+            Self::SelfRef => "self".to_string(),
+            Self::Tuple { items } => format!(
+                "({})",
+                items
+                    .iter()
+                    .map(Self::render_constraint_expression)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Path { segments, .. } => render_path_segments(segments),
+            Self::Unary { op, expr } => match op {
+                UnaryExpressionOp::Negate => format!("-{}", expr.render_constraint_expression()),
+                UnaryExpressionOp::Not => format!("not {}", expr.render_constraint_expression()),
+            },
+            Self::Binary { left, op, right } => format!(
+                "({} {} {})",
+                left.render_constraint_expression(),
+                op.constraint_symbol(),
+                right.render_constraint_expression()
+            ),
+            Self::Call { function, args } => format!(
+                "{function}({})",
+                args.iter()
+                    .map(Self::render_constraint_expression)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+
+    pub fn collect_path_variables(&self, output: &mut BTreeSet<String>) {
+        match self {
+            Self::Path { segments, .. } => {
+                output.insert(render_path_segments(segments));
+            }
+            Self::Tuple { items } => {
+                for item in items {
+                    item.collect_path_variables(output);
+                }
+            }
+            Self::Unary { expr, .. } => expr.collect_path_variables(output),
+            Self::Binary { left, right, .. } => {
+                left.collect_path_variables(output);
+                right.collect_path_variables(output);
+            }
+            Self::Call { args, .. } => {
+                for arg in args {
+                    arg.collect_path_variables(output);
+                }
+            }
+            Self::Literal { .. } | Self::SelfRef => {}
         }
     }
 
@@ -304,6 +362,80 @@ impl ExpressionIr {
             }
         }
     }
+}
+
+impl BinaryExpressionOp {
+    fn constraint_symbol(self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Subtract => "-",
+            Self::Multiply => "*",
+            Self::Divide => "/",
+            Self::Power => "^",
+            Self::Equal => "==",
+            Self::NotEqual => "!=",
+            Self::Less => "<",
+            Self::LessEqual => "<=",
+            Self::Greater => ">",
+            Self::GreaterEqual => ">=",
+            Self::And => "and",
+            Self::Or => "or",
+        }
+    }
+}
+
+fn normalize_expression_ir_value(value: &Value) -> Value {
+    let Some(object) = value.as_object() else {
+        return value.clone();
+    };
+
+    let mut normalized = object.clone();
+    match normalized.get("kind").and_then(Value::as_str) {
+        Some("path") => {
+            normalized
+                .entry("root".to_string())
+                .or_insert_with(|| Value::String("self".to_string()));
+        }
+        Some("tuple") => normalize_array_field(&mut normalized, "items"),
+        Some("unary") => normalize_object_field(&mut normalized, "expr"),
+        Some("binary") => {
+            normalize_object_field(&mut normalized, "left");
+            normalize_object_field(&mut normalized, "right");
+        }
+        Some("call") => normalize_array_field(&mut normalized, "args"),
+        _ => {}
+    }
+    Value::Object(normalized)
+}
+
+fn normalize_object_field(object: &mut serde_json::Map<String, Value>, field: &str) {
+    if let Some(value) = object.get(field).cloned() {
+        object.insert(field.to_string(), normalize_expression_ir_value(&value));
+    }
+}
+
+fn normalize_array_field(object: &mut serde_json::Map<String, Value>, field: &str) {
+    if let Some(values) = object.get(field).and_then(Value::as_array) {
+        object.insert(
+            field.to_string(),
+            Value::Array(values.iter().map(normalize_expression_ir_value).collect()),
+        );
+    }
+}
+
+fn render_literal_value(value: &Value) -> String {
+    value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn render_path_segments(segments: &[ExpressionPathSegment]) -> String {
+    segments
+        .iter()
+        .map(ExpressionPathSegment::name)
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 pub trait ExpressionEvaluationContext {

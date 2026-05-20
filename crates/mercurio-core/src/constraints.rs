@@ -4,6 +4,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::expression::ExpressionIr;
 use crate::graph::{Element, Graph};
 use crate::runtime::ExecutionContext;
 
@@ -386,9 +387,15 @@ fn source_from_element(element: &Element) -> Option<ConstraintSource> {
 
     let expression_ir = element.properties.get("expression_ir")?;
     let target = variable_id_from_element(element);
-    let rhs = render_expression_ir(expression_ir);
+    let parsed_ir = ExpressionIr::from_value(expression_ir).ok();
+    let rhs = parsed_ir
+        .as_ref()
+        .map(ExpressionIr::render_constraint_expression)
+        .unwrap_or_else(|| expression_ir.to_string());
     let mut variables = BTreeSet::from([target.clone()]);
-    collect_expression_ir_variables(expression_ir, &mut variables);
+    if let Some(expression_ir) = &parsed_ir {
+        expression_ir.collect_path_variables(&mut variables);
+    }
     Some(ConstraintSource {
         id: element.element_id.clone(),
         label,
@@ -790,155 +797,6 @@ fn graph_edges(
         }
     }
     edges
-}
-
-fn render_expression_ir(value: &Value) -> String {
-    let Some(object) = value.as_object() else {
-        return value.to_string();
-    };
-    match object
-        .get("kind")
-        .or_else(|| object.get("type"))
-        .and_then(Value::as_str)
-    {
-        Some("literal") => object
-            .get("value")
-            .map(render_literal_value)
-            .unwrap_or_else(|| value.to_string()),
-        Some("path") => render_expression_ir_path(value),
-        Some("unary") => {
-            let op = object.get("op").and_then(Value::as_str).unwrap_or("-");
-            let operand = object
-                .get("operand")
-                .or_else(|| object.get("expr"))
-                .map(render_expression_ir)
-                .unwrap_or_else(|| "?".to_string());
-            format!("{op}{operand}")
-        }
-        Some("binary") => {
-            let op = render_expression_ir_binary_op(object.get("op").and_then(Value::as_str));
-            let left = object
-                .get("left")
-                .map(render_expression_ir)
-                .unwrap_or_else(|| "?".to_string());
-            let right = object
-                .get("right")
-                .map(render_expression_ir)
-                .unwrap_or_else(|| "?".to_string());
-            format!("({left} {op} {right})")
-        }
-        Some("call") => {
-            let function = object
-                .get("function")
-                .and_then(Value::as_str)
-                .or_else(|| object.get("name").and_then(Value::as_str))
-                .unwrap_or("call");
-            let args = object
-                .get("args")
-                .or_else(|| object.get("arguments"))
-                .and_then(Value::as_array)
-                .map(|args| {
-                    args.iter()
-                        .map(render_expression_ir)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default();
-            format!("{function}({args})")
-        }
-        _ => value.to_string(),
-    }
-}
-
-fn render_literal_value(value: &Value) -> String {
-    value
-        .as_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| value.to_string())
-}
-
-fn render_expression_ir_binary_op(op: Option<&str>) -> &'static str {
-    match op {
-        Some("add" | "+") => "+",
-        Some("subtract" | "sub" | "-") => "-",
-        Some("multiply" | "mul" | "*") => "*",
-        Some("divide" | "div" | "/") => "/",
-        Some("equal" | "eq" | "==" | "=") => "==",
-        Some("less_equal" | "le" | "<=") => "<=",
-        Some("greater_equal" | "ge" | ">=") => ">=",
-        Some("less" | "lt" | "<") => "<",
-        Some("greater" | "gt" | ">") => ">",
-        _ => "?",
-    }
-}
-
-fn render_expression_ir_path(value: &Value) -> String {
-    let Some(object) = value.as_object() else {
-        return value.to_string();
-    };
-    if let Some(path) = object.get("path").and_then(Value::as_str) {
-        return path.to_string();
-    }
-    if let Some(name) = object.get("name").and_then(Value::as_str) {
-        return name.to_string();
-    }
-    object
-        .get("segments")
-        .and_then(Value::as_array)
-        .map(|segments| {
-            segments
-                .iter()
-                .filter_map(|segment| {
-                    segment
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .or_else(|| segment.as_str())
-                })
-                .collect::<Vec<_>>()
-                .join(".")
-        })
-        .filter(|path| !path.is_empty())
-        .unwrap_or_else(|| value.to_string())
-}
-
-fn collect_expression_ir_variables(value: &Value, output: &mut BTreeSet<String>) {
-    let Some(object) = value.as_object() else {
-        return;
-    };
-    match object
-        .get("kind")
-        .or_else(|| object.get("type"))
-        .and_then(Value::as_str)
-    {
-        Some("path") => {
-            output.insert(render_expression_ir_path(value));
-        }
-        Some("unary") => {
-            if let Some(operand) = object.get("operand").or_else(|| object.get("expr")) {
-                collect_expression_ir_variables(operand, output);
-            }
-        }
-        Some("binary") => {
-            if let Some(left) = object.get("left") {
-                collect_expression_ir_variables(left, output);
-            }
-            if let Some(right) = object.get("right") {
-                collect_expression_ir_variables(right, output);
-            }
-        }
-        Some("call") => {
-            if let Some(args) = object
-                .get("args")
-                .or_else(|| object.get("arguments"))
-                .and_then(Value::as_array)
-            {
-                for arg in args {
-                    collect_expression_ir_variables(arg, output);
-                }
-            }
-        }
-        _ => {}
-    }
 }
 
 fn eval_number(expr: &Expr, values: &HashMap<String, f64>) -> Option<f64> {
