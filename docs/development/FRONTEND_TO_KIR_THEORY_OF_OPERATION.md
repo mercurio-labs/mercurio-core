@@ -481,7 +481,7 @@ The runtime should evaluate `expression_ir` from KIR, not reparse the original S
 
 ## Relationship To The Runtime Graph
 
-KIR properties are semantic data. The graph builder creates edges by scanning property values for strings that match known element ids.
+KIR properties are semantic data. The graph builder creates edges from registered reference fields in the KIR field contract. It does not infer edges from every string that happens to match a known element id.
 
 Example:
 
@@ -502,7 +502,7 @@ feature.Demo.Vehicle.engine --owner--> type.Demo.Vehicle
 feature.Demo.Vehicle.engine --type-->  type.Demo.Engine
 ```
 
-This is why frontend resolution matters. Unresolved text remains scalar JSON and does not become a graph edge.
+This is why frontend resolution matters. Unresolved text remains scalar JSON and does not become a graph edge. Non-reference fields such as documentation and names also remain scalar data, even when their text matches an element id.
 
 ## Frontend And Metamodel Responsibilities
 

@@ -88,7 +88,10 @@ pub use goal::{
     evaluate_semantic_goal, explain_semantic_goal,
 };
 pub use graph::{Edge, Graph, GraphError, NodeId};
-pub use ir::{KirDocument, KirElement, KirError, load_model_stack};
+pub use ir::{
+    KIR_SCHEMA_VERSION, KirDocument, KirElement, KirError, KirFieldKind, KirFieldRegistry,
+    KirFieldSpec, load_model_stack,
+};
 pub use library::{
     BaselineLibraryConfig, KparPackageBuild, KparPackageSource, LibraryCacheMetadata,
     LibraryProviderConfig, ResolvedLibraryArtifact, load_baseline_library_document,

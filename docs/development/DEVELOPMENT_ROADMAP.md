@@ -25,7 +25,7 @@ Plans that conflict with these documents should be updated or treated as histori
 Current partially implemented areas:
 
 - SysML/KerML frontend path: parsing, resolution, KIR emission, and linting exist, but robust KerML coverage and conformance tracking are still growing.
-- `expression_ir`: parsing, emission, runtime evaluation, and constraint rendering exist for a useful subset; remaining work is coverage, schema, and compatibility.
+- `expression_ir`: parsing, emission, runtime evaluation, and constraint rendering exist for a useful subset; remaining work is coverage and schema.
 - Datalog-derived indexes: core rule packs, graph fact extraction, and materialized indexes exist; remaining work is scope, cache policy, explanation surface, and benchmark-backed integration.
 - Views and diagrams: core DTOs/projections exist for selected slices; remaining work is shared context handling, product API/UI alignment, and view IR consolidation.
 - Project descriptors and library providers: several provider kinds exist; API-backed snapshots and richer package-set workflows remain open.

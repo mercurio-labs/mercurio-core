@@ -1,9 +1,9 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use serde_json::Value;
 
-use crate::ir::{KirDocument, KirElement};
+use crate::ir::{KirDocument, KirElement, KirFieldRegistry};
 
 pub type NodeId = u32;
 
@@ -78,16 +78,16 @@ impl Graph {
     }
 
     fn build_edges(&mut self) -> Result<(), GraphError> {
-        let known_ids: HashSet<&str> = self.by_element_id.keys().map(String::as_str).collect();
+        let field_registry = KirFieldRegistry::standard();
 
         for element in &self.elements {
             for (property, value) in &element.properties {
                 if property == "element_id" {
                     continue;
                 }
-                for external_target in referenced_ids(value, &known_ids) {
+                for external_target in field_registry.reference_ids(property, value) {
                     let Some(&target) = self.by_element_id.get(external_target) else {
-                        return Err(GraphError::UnknownElement(external_target.to_string()));
+                        continue;
                     };
                     let edge = Edge {
                         source: element.id,
@@ -194,20 +194,6 @@ impl Element {
     }
 }
 
-fn referenced_ids<'a>(value: &'a Value, known_ids: &HashSet<&str>) -> Vec<&'a str> {
-    match value {
-        Value::String(s) if known_ids.contains(s.as_str()) => vec![s],
-        Value::Array(items) => items
-            .iter()
-            .filter_map(|item| match item {
-                Value::String(s) if known_ids.contains(s.as_str()) => Some(s.as_str()),
-                _ => None,
-            })
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +291,60 @@ mod tests {
 
         assert_eq!(metatype_targets, vec!["SysML::Systems::PartDefinition"]);
         assert_eq!(specialization_targets, vec!["type.ImagingDevice"]);
+    }
+
+    #[test]
+    fn non_reference_strings_do_not_create_edges() {
+        let graph = Graph::from_document(KirDocument {
+            metadata: BTreeMap::new(),
+            elements: vec![
+                KirElement {
+                    id: "type.Demo.Vehicle".to_string(),
+                    kind: "SysML::Systems::PartDefinition".to_string(),
+                    layer: 2,
+                    properties: BTreeMap::from([(
+                        "documentation".to_string(),
+                        Value::String("type.Demo.Engine".to_string()),
+                    )]),
+                },
+                KirElement {
+                    id: "type.Demo.Engine".to_string(),
+                    kind: "SysML::Systems::PartDefinition".to_string(),
+                    layer: 2,
+                    properties: BTreeMap::new(),
+                },
+            ],
+        })
+        .unwrap();
+
+        assert!(graph.edges().is_empty());
+    }
+
+    #[test]
+    fn registered_reference_list_scalar_creates_edge() {
+        let graph = Graph::from_document(KirDocument {
+            metadata: BTreeMap::new(),
+            elements: vec![
+                KirElement {
+                    id: "type.Demo.Vehicle".to_string(),
+                    kind: "SysML::Systems::PartDefinition".to_string(),
+                    layer: 2,
+                    properties: BTreeMap::from([(
+                        "specializes".to_string(),
+                        Value::String("type.Demo.Machine".to_string()),
+                    )]),
+                },
+                KirElement {
+                    id: "type.Demo.Machine".to_string(),
+                    kind: "SysML::Systems::PartDefinition".to_string(),
+                    layer: 2,
+                    properties: BTreeMap::new(),
+                },
+            ],
+        })
+        .unwrap();
+
+        assert_eq!(graph.edge_count(), 1);
+        assert_eq!(graph.edges()[0].relation, "specializes");
     }
 }

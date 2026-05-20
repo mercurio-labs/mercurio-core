@@ -159,14 +159,15 @@ Property names are intentionally semantic, not parser-specific. Frontends should
 
 ## Reference And Edge Rules
 
-The graph builder discovers references from element properties.
+The graph builder discovers references from element properties through the KIR field contract.
 
-For each property except `element_id`:
+For each registered reference field:
 
 - if the value is a string equal to a known element id, it creates an edge
 - if the value is an array, each string item equal to a known element id creates an edge
 - objects are not recursively scanned for references
 - strings that do not match known ids remain scalar data and do not create edges
+- unregistered fields never create graph edges
 
 The edge relation is the property name.
 
@@ -187,6 +188,8 @@ Example:
 This can create outgoing `specializes` and `features` edges if those target ids are present in the merged document.
 
 Because unresolved string references do not become edges, source frontends should diagnose unresolved semantic references before or during KIR emission when that reference is required for correctness.
+
+Non-reference fields do not create edges even if their text happens to equal an element id. For example, `documentation: "type.Demo.Vehicle"` remains documentation text and is not treated as a semantic relationship.
 
 ## Metadata
 
@@ -396,18 +399,19 @@ KIR should remain stable enough that:
 - UI features can inspect elements without knowing the source language
 - project repositories and server workflows can validate and compare semantic changes across revisions
 
-Breaking changes to KIR should be handled deliberately. A future stricter schema should add explicit version metadata, define required properties for major element categories, and include migration or compatibility behavior for existing artifacts.
+Breaking changes to KIR should be handled deliberately. A future stricter schema should add explicit version metadata, define field contracts for semantic properties, and invalidate generated artifacts and caches when the schema changes. During the current tightening phase, old KIR artifacts should be regenerated from source rather than migrated.
 
 ## Open Tightening Work
 
 The current implementation allows flexible JSON properties. The next specification work should define:
 
 - a formal JSON Schema for `KirDocument`
-- required property sets by `kind`
+- a field contract that distinguishes scalar fields, reference fields, expression data, metadata, and extension data
 - canonical id templates for all supported construct classes
 - complete `expression_ir` schema
 - recursive or typed reference fields, if needed
 - document-level schema/version metadata
 - validation rules for precompiled KIR artifacts
+- metamodel-derived capability validation instead of hand-maintained kind-profile tables
 
 The staged schema plan is tracked in [KIR Schema Roadmap](KIR_SCHEMA_ROADMAP.md).
