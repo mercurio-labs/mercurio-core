@@ -13,6 +13,7 @@ pub mod ir;
 pub mod language;
 pub mod library;
 pub mod logging;
+pub mod metadata;
 pub mod metamodel;
 pub mod mutation;
 pub mod outline;
@@ -103,6 +104,10 @@ pub use library::{
     BaselineLibraryConfig, KparPackageBuild, KparPackageSource, LibraryCacheMetadata,
     LibraryProviderConfig, ResolvedLibraryArtifact, load_baseline_library_document,
     write_kpar_package,
+};
+pub use metadata::{
+    KirMetadataAnnotation, metadata_annotations, metadata_annotations_named,
+    metadata_string_property,
 };
 pub use metamodel::{
     AttributeRow, AttributeValueSource, ElementAttributeQuery, ElementSummary,
