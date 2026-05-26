@@ -11,8 +11,8 @@ use mercurio_core::frontend::sysml::{compile_sysml_text_with_context_report, par
 use mercurio_core::{
     KirDocument, KparPackageBuild, KparPackageSource, LibraryProviderConfig, LintReport,
     LintSeverity, PROJECT_DESCRIPTOR_FILE_NAME, ProjectDescriptor, QueryEngine, QueryResultSet,
-    Runtime, SemanticCompileStatus, SourceLanguage, default_stdlib_path, lint_text, parse_query,
-    resolve_project_context, write_kpar_package,
+    Runtime, SemanticCompileStatus, SourceLanguage, StateMachineModel, default_stdlib_path,
+    lint_text, parse_query, project_state_machines, resolve_project_context, write_kpar_package,
 };
 use mercurio_reasoner_api::{
     CapabilityDescriptor, ReasoningReport, ReasoningStatus, SemanticArtifactRef,
@@ -145,6 +145,7 @@ struct ReasonCommand {
 enum ReasonSubcommand {
     Capabilities(ReasonCapabilitiesCommand),
     RequirementCoverage(RequirementCoverageCommand),
+    StateMachineProjection(StateMachineProjectionCommand),
 }
 
 #[derive(Debug, Args)]
@@ -155,6 +156,22 @@ struct ReasonCapabilitiesCommand {
 
 #[derive(Debug, Args)]
 struct RequirementCoverageCommand {
+    #[command(flatten)]
+    input: SingleInput,
+    #[arg(long)]
+    kir: Option<PathBuf>,
+    #[arg(long)]
+    kpar: Option<PathBuf>,
+    #[arg(long, value_enum)]
+    language: Option<LanguageArg>,
+    #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+    format: OutputFormat,
+    #[arg(long)]
+    stdlib: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct StateMachineProjectionCommand {
     #[command(flatten)]
     input: SingleInput,
     #[arg(long)]
@@ -532,6 +549,7 @@ fn run_reason(command: ReasonCommand) -> Result<RunResult, CliError> {
     match command.command {
         ReasonSubcommand::Capabilities(command) => run_reason_capabilities(command),
         ReasonSubcommand::RequirementCoverage(command) => run_requirement_coverage(command),
+        ReasonSubcommand::StateMachineProjection(command) => run_state_machine_projection(command),
     }
 }
 
@@ -562,6 +580,24 @@ fn run_requirement_coverage(command: RequirementCoverageCommand) -> Result<RunRe
 
     Ok(RunResult {
         exit_code: if failed { 1 } else { 0 },
+        stdout,
+    })
+}
+
+fn run_state_machine_projection(
+    command: StateMachineProjectionCommand,
+) -> Result<RunResult, CliError> {
+    let model = read_state_machine_projection_model_input(&command)?;
+    let runtime = Runtime::from_document(model.document)
+        .map_err(|err| CliError::execution(format!("failed to build runtime: {err}")))?;
+    let machines = project_state_machines(&runtime);
+    let stdout = match command.format {
+        OutputFormat::Json => to_pretty_json(&machines)?,
+        OutputFormat::Text => format_state_machine_projection_text(&machines),
+    };
+
+    Ok(RunResult {
+        exit_code: 0,
         stdout,
     })
 }
@@ -959,6 +995,22 @@ fn read_query_model_input(command: &QueryCommand) -> Result<QueryModelInput, Cli
 
 fn read_requirement_coverage_model_input(
     command: &RequirementCoverageCommand,
+) -> Result<QueryModelInput, CliError> {
+    let query_command = QueryCommand {
+        input: command.input.clone(),
+        kir: command.kir.clone(),
+        kpar: command.kpar.clone(),
+        query: Some("from elements select id limit 1".to_string()),
+        query_file: None,
+        language: command.language,
+        format: command.format,
+        stdlib: command.stdlib.clone(),
+    };
+    read_query_model_input(&query_command)
+}
+
+fn read_state_machine_projection_model_input(
+    command: &StateMachineProjectionCommand,
 ) -> Result<QueryModelInput, CliError> {
     let query_command = QueryCommand {
         input: command.input.clone(),
@@ -1882,6 +1934,38 @@ fn format_requirement_coverage_text(report: &ReasoningReport) -> String {
     output
 }
 
+fn format_state_machine_projection_text(machines: &[StateMachineModel]) -> String {
+    let mut output = String::new();
+    output.push_str(&format!("state_machines: {}\n", machines.len()));
+    for machine in machines {
+        output.push_str(&format!(
+            "- {} states={} transitions={}\n",
+            machine.id,
+            machine.states.len(),
+            machine.transitions.len()
+        ));
+        for state in &machine.states {
+            output.push_str(&format!(
+                "  state {} initial={} final={} parent={}\n",
+                state.id,
+                state.is_initial,
+                state.is_final,
+                state.parent_state_id.as_deref().unwrap_or("-")
+            ));
+        }
+        for transition in &machine.transitions {
+            output.push_str(&format!(
+                "  transition {} {} -> {} trigger={}\n",
+                transition.id,
+                transition.source,
+                transition.target,
+                transition.trigger.as_deref().unwrap_or("-")
+            ));
+        }
+    }
+    output
+}
+
 fn format_reason_capabilities_text(capabilities: &[CapabilityDescriptor]) -> String {
     let mut output = String::new();
     for capability in capabilities {
@@ -2721,10 +2805,43 @@ mod tests {
 
         assert_eq!(result.exit_code, 0);
         let json: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
-        assert_eq!(json.as_array().unwrap().len(), 1);
-        assert_eq!(json[0]["id"], "mercurio.requirement.coverage");
-        assert_eq!(json[0]["kind"], "requirement_coverage");
-        assert_eq!(json[0]["deterministic"], true);
+        assert!(json.as_array().unwrap().iter().any(|capability| {
+            capability["id"] == "mercurio.requirement.coverage"
+                && capability["kind"] == "requirement_coverage"
+                && capability["deterministic"] == true
+        }));
+    }
+
+    #[test]
+    fn reason_state_machine_projection_reports_nested_state() {
+        let path = mercurio_core::repo_path("examples/state_machine_model.json");
+        let result = run_args(&[
+            "reason",
+            "state-machine-projection",
+            "--kir",
+            path.to_str().unwrap(),
+            "--format",
+            "json",
+        ])
+        .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let json: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
+        assert_eq!(json[0]["id"], "ServerBehavior");
+        assert!(json[0]["states"].as_array().unwrap().iter().any(|state| {
+            state["id"] == "state.ServerBehavior.waiting.idle"
+                && state["parent_state_id"] == "state.ServerBehavior.waiting"
+        }));
+        assert!(
+            json[0]["transitions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|transition| {
+                    transition["id"] == "transition.ServerBehavior.timeout"
+                        && transition["trigger_kind"] == "after"
+                })
+        );
     }
 
     #[test]

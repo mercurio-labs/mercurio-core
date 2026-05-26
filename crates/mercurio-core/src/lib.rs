@@ -43,7 +43,10 @@ pub use authoring::{
     load_authoring_project_from_sysml,
 };
 pub use behavior::{
-    StateMachineModel, StateNode, TransitionNode, project_state_machines,
+    StateMachineExecutionReport, StateMachineExecutionStatus, StateMachineModel,
+    StateMachineScenario, StateMachineScenarioEvent, StateMachineTraceStep,
+    StateMachineValidationFinding, StateMachineValidationSeverity, StateNode,
+    StateTransitionTriggerKind, TransitionNode, project_state_machines,
     project_state_machines_from_graph,
 };
 pub use constraints::{

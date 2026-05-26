@@ -1137,6 +1137,12 @@ fn enrich_usage_semantics(element: &mut KirElement, usage: &ResolvedUsage, owner
             .properties
             .insert("is_variable".to_string(), Value::Bool(defaults.is_variable));
     }
+    if usage.construct == "StateUsage" && usage.owner_construct == "StateUsage" {
+        element.properties.insert(
+            "parent_state".to_string(),
+            Value::String(owner_id.to_string()),
+        );
+    }
 
     if usage.construct == "PartUsage"
         && usage.owner_construct == "ItemDefinition"

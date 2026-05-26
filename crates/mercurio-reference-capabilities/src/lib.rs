@@ -389,6 +389,65 @@ pub fn analyze_state_machine_simulation(
                 FindingSeverity::Error,
             ));
         }
+        for validation in machine.validate_structure() {
+            if matches!(
+                validation.code.as_str(),
+                "missing_parent_state"
+                    | "compound_state_missing_initial_child"
+                    | "compound_state_multiple_initial_children"
+                    | "missing_transition_source"
+                    | "missing_transition_target"
+            ) {
+                findings.push(ReasoningFinding {
+                    id: format!(
+                        "finding.state_machine.{}.{}",
+                        validation.code,
+                        validation
+                            .state_id
+                            .as_deref()
+                            .or(validation.transition_id.as_deref())
+                            .unwrap_or(machine.id.as_str())
+                    ),
+                    title: validation
+                        .code
+                        .replace('_', " ")
+                        .split(' ')
+                        .map(|word| {
+                            let mut chars = word.chars();
+                            chars
+                                .next()
+                                .map(|first| {
+                                    first.to_uppercase().collect::<String>() + chars.as_str()
+                                })
+                                .unwrap_or_default()
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    severity: match validation.severity {
+                        mercurio_core::StateMachineValidationSeverity::Warning => {
+                            FindingSeverity::Warning
+                        }
+                        mercurio_core::StateMachineValidationSeverity::Error => {
+                            FindingSeverity::Error
+                        }
+                    },
+                    message: validation.message,
+                    elements: validation
+                        .state_id
+                        .and_then(|state_id| {
+                            machine
+                                .states
+                                .iter()
+                                .find(|state| state.id == state_id)
+                                .map(|state| vec![state_ref(state)])
+                        })
+                        .unwrap_or_default(),
+                    source_spans: Vec::new(),
+                    evidence_ids: vec![format!("evidence.state_machine.{}", machine.id)],
+                    properties: BTreeMap::from([("machineId".to_string(), json!(machine.id))]),
+                });
+            }
+        }
 
         let reachable = machine.reachable_state_ids();
         for state in &machine.states {
@@ -464,6 +523,9 @@ pub fn analyze_state_machine_simulation(
                 "source": transition.source,
                 "target": transition.target,
                 "trigger": transition.trigger,
+                "triggerKind": transition.trigger_kind,
+                "guard": transition.guard,
+                "effect": transition.effect,
             })).collect::<Vec<_>>(),
         }));
     }

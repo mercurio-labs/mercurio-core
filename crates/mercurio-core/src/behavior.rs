@@ -31,6 +31,79 @@ pub struct TransitionNode {
     pub source: String,
     pub target: String,
     pub trigger: Option<String>,
+    pub trigger_kind: StateTransitionTriggerKind,
+    pub guard: Option<Value>,
+    pub effect: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateTransitionTriggerKind {
+    Event,
+    Time,
+    After,
+    Change,
+    Completion,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateMachineValidationFinding {
+    pub code: String,
+    pub severity: StateMachineValidationSeverity,
+    pub message: String,
+    pub machine_id: String,
+    pub state_id: Option<String>,
+    pub transition_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateMachineValidationSeverity {
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateMachineScenario {
+    pub id: String,
+    pub initial_state_id: Option<String>,
+    pub events: Vec<StateMachineScenarioEvent>,
+    pub max_steps: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateMachineScenarioEvent {
+    pub id: String,
+    pub trigger: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateMachineExecutionReport {
+    pub machine_id: String,
+    pub status: StateMachineExecutionStatus,
+    pub active_configuration: Vec<String>,
+    pub steps: Vec<StateMachineTraceStep>,
+    pub diagnostics: Vec<StateMachineValidationFinding>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateMachineExecutionStatus {
+    Completed,
+    Blocked,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateMachineTraceStep {
+    pub step: usize,
+    pub event_id: Option<String>,
+    pub trigger: Option<String>,
+    pub transition_id: Option<String>,
+    pub before: Vec<String>,
+    pub after: Vec<String>,
+    pub explanation: String,
 }
 
 impl StateMachineModel {
@@ -74,6 +147,318 @@ impl StateMachineModel {
                 (count > 1).then_some((source, trigger, count))
             })
             .collect()
+    }
+
+    pub fn validate_structure(&self) -> Vec<StateMachineValidationFinding> {
+        let mut findings = Vec::new();
+        let states_by_id = self
+            .states
+            .iter()
+            .map(|state| (state.id.as_str(), state))
+            .collect::<BTreeMap<_, _>>();
+
+        if self.states.is_empty() {
+            findings.push(self.machine_finding(
+                "no_states",
+                StateMachineValidationSeverity::Warning,
+                "The state machine candidate has no owned states to simulate.",
+            ));
+        }
+
+        let top_initial_states = self
+            .states
+            .iter()
+            .filter(|state| state.parent_state_id.is_none() && state.is_initial)
+            .collect::<Vec<_>>();
+        if top_initial_states.is_empty() && !self.states.is_empty() {
+            findings.push(self.machine_finding(
+                "no_initial_state",
+                StateMachineValidationSeverity::Error,
+                "Structural simulation needs one top-level initial state.",
+            ));
+        }
+        if top_initial_states.len() > 1 {
+            findings.push(self.machine_finding(
+                "multiple_initial_states",
+                StateMachineValidationSeverity::Error,
+                "Structural simulation found more than one top-level state marked initial.",
+            ));
+        }
+
+        for state in &self.states {
+            if let Some(parent_id) = &state.parent_state_id
+                && !states_by_id.contains_key(parent_id.as_str())
+            {
+                findings.push(self.state_finding(
+                    state,
+                    "missing_parent_state",
+                    StateMachineValidationSeverity::Error,
+                    "Nested state references a parent state that is not present.",
+                ));
+            }
+        }
+
+        for parent in self.states.iter().filter(|candidate| {
+            self.states
+                .iter()
+                .any(|state| state.parent_state_id.as_deref() == Some(candidate.id.as_str()))
+        }) {
+            let initial_children = self
+                .states
+                .iter()
+                .filter(|state| {
+                    state.parent_state_id.as_deref() == Some(parent.id.as_str()) && state.is_initial
+                })
+                .collect::<Vec<_>>();
+            if initial_children.is_empty() {
+                findings.push(self.state_finding(
+                    parent,
+                    "compound_state_missing_initial_child",
+                    StateMachineValidationSeverity::Warning,
+                    "Compound state has child states but no initial child state.",
+                ));
+            }
+            if initial_children.len() > 1 {
+                findings.push(self.state_finding(
+                    parent,
+                    "compound_state_multiple_initial_children",
+                    StateMachineValidationSeverity::Error,
+                    "Compound state has more than one initial child state.",
+                ));
+            }
+        }
+
+        for transition in &self.transitions {
+            if !states_by_id.contains_key(transition.source.as_str()) {
+                findings.push(self.transition_finding(
+                    transition,
+                    "missing_transition_source",
+                    StateMachineValidationSeverity::Error,
+                    "Transition source state is not present.",
+                ));
+            }
+            if !states_by_id.contains_key(transition.target.as_str()) {
+                findings.push(self.transition_finding(
+                    transition,
+                    "missing_transition_target",
+                    StateMachineValidationSeverity::Error,
+                    "Transition target state is not present.",
+                ));
+            }
+        }
+
+        findings
+    }
+
+    pub fn execute_scenario(&self, scenario: &StateMachineScenario) -> StateMachineExecutionReport {
+        let diagnostics = self.validate_structure();
+        if diagnostics
+            .iter()
+            .any(|finding| finding.severity == StateMachineValidationSeverity::Error)
+        {
+            return StateMachineExecutionReport {
+                machine_id: self.id.clone(),
+                status: StateMachineExecutionStatus::Failed,
+                active_configuration: Vec::new(),
+                steps: Vec::new(),
+                diagnostics,
+            };
+        }
+
+        let mut active = match scenario
+            .initial_state_id
+            .as_ref()
+            .or_else(|| {
+                self.states
+                    .iter()
+                    .find(|state| state.parent_state_id.is_none() && state.is_initial)
+                    .map(|state| &state.id)
+            })
+            .and_then(|state_id| self.enter_state_configuration(state_id))
+        {
+            Some(configuration) => configuration,
+            None => {
+                let mut diagnostics = diagnostics;
+                diagnostics.push(self.machine_finding(
+                    "no_executable_initial_state",
+                    StateMachineValidationSeverity::Error,
+                    "No initial state configuration could be created.",
+                ));
+                return StateMachineExecutionReport {
+                    machine_id: self.id.clone(),
+                    status: StateMachineExecutionStatus::Failed,
+                    active_configuration: Vec::new(),
+                    steps: Vec::new(),
+                    diagnostics,
+                };
+            }
+        };
+
+        let mut steps = Vec::new();
+        for (index, event) in scenario
+            .events
+            .iter()
+            .take(scenario.max_steps.max(1))
+            .enumerate()
+        {
+            let before = active.clone();
+            if let Some(transition) = self.select_transition(&active, &event.trigger) {
+                if let Some(after) = self.enter_state_configuration(&transition.target) {
+                    active = after;
+                    steps.push(StateMachineTraceStep {
+                        step: index + 1,
+                        event_id: Some(event.id.clone()),
+                        trigger: Some(event.trigger.clone()),
+                        transition_id: Some(transition.id.clone()),
+                        before,
+                        after: active.clone(),
+                        explanation: format!(
+                            "Transition `{}` fired for trigger `{}`.",
+                            transition.id, event.trigger
+                        ),
+                    });
+                } else {
+                    steps.push(StateMachineTraceStep {
+                        step: index + 1,
+                        event_id: Some(event.id.clone()),
+                        trigger: Some(event.trigger.clone()),
+                        transition_id: Some(transition.id.clone()),
+                        before: before.clone(),
+                        after: before,
+                        explanation: format!(
+                            "Transition `{}` targeted a state that could not be entered.",
+                            transition.id
+                        ),
+                    });
+                    return StateMachineExecutionReport {
+                        machine_id: self.id.clone(),
+                        status: StateMachineExecutionStatus::Failed,
+                        active_configuration: active,
+                        steps,
+                        diagnostics,
+                    };
+                }
+            } else {
+                steps.push(StateMachineTraceStep {
+                    step: index + 1,
+                    event_id: Some(event.id.clone()),
+                    trigger: Some(event.trigger.clone()),
+                    transition_id: None,
+                    before: before.clone(),
+                    after: before,
+                    explanation: format!(
+                        "No enabled transition matched trigger `{}`.",
+                        event.trigger
+                    ),
+                });
+                return StateMachineExecutionReport {
+                    machine_id: self.id.clone(),
+                    status: StateMachineExecutionStatus::Blocked,
+                    active_configuration: active,
+                    steps,
+                    diagnostics,
+                };
+            }
+        }
+
+        StateMachineExecutionReport {
+            machine_id: self.id.clone(),
+            status: StateMachineExecutionStatus::Completed,
+            active_configuration: active,
+            steps,
+            diagnostics,
+        }
+    }
+
+    fn enter_state_configuration(&self, state_id: &str) -> Option<Vec<String>> {
+        let mut configuration = self.ancestor_path(state_id)?;
+        let mut current = state_id.to_string();
+        loop {
+            let Some(initial_child) = self.states.iter().find(|state| {
+                state.parent_state_id.as_deref() == Some(current.as_str()) && state.is_initial
+            }) else {
+                return Some(configuration);
+            };
+            configuration.push(initial_child.id.clone());
+            current = initial_child.id.clone();
+        }
+    }
+
+    fn ancestor_path(&self, state_id: &str) -> Option<Vec<String>> {
+        let mut path = Vec::new();
+        let mut cursor = self.states.iter().find(|state| state.id == state_id)?;
+        loop {
+            path.push(cursor.id.clone());
+            let Some(parent_id) = &cursor.parent_state_id else {
+                path.reverse();
+                return Some(path);
+            };
+            cursor = self.states.iter().find(|state| state.id == *parent_id)?;
+        }
+    }
+
+    fn select_transition<'a>(
+        &'a self,
+        active_configuration: &[String],
+        trigger: &str,
+    ) -> Option<&'a TransitionNode> {
+        active_configuration.iter().rev().find_map(|state_id| {
+            self.transitions.iter().find(|transition| {
+                transition.source == *state_id
+                    && transition.trigger.as_deref() == Some(trigger)
+                    && transition.guard.is_none()
+            })
+        })
+    }
+
+    fn machine_finding(
+        &self,
+        code: &str,
+        severity: StateMachineValidationSeverity,
+        message: &str,
+    ) -> StateMachineValidationFinding {
+        StateMachineValidationFinding {
+            code: code.to_string(),
+            severity,
+            message: message.to_string(),
+            machine_id: self.id.clone(),
+            state_id: None,
+            transition_id: None,
+        }
+    }
+
+    fn state_finding(
+        &self,
+        state: &StateNode,
+        code: &str,
+        severity: StateMachineValidationSeverity,
+        message: &str,
+    ) -> StateMachineValidationFinding {
+        StateMachineValidationFinding {
+            code: code.to_string(),
+            severity,
+            message: message.to_string(),
+            machine_id: self.id.clone(),
+            state_id: Some(state.id.clone()),
+            transition_id: None,
+        }
+    }
+
+    fn transition_finding(
+        &self,
+        transition: &TransitionNode,
+        code: &str,
+        severity: StateMachineValidationSeverity,
+        message: &str,
+    ) -> StateMachineValidationFinding {
+        StateMachineValidationFinding {
+            code: code.to_string(),
+            severity,
+            message: message.to_string(),
+            machine_id: self.id.clone(),
+            state_id: None,
+            transition_id: Some(transition.id.clone()),
+        }
     }
 }
 
@@ -127,6 +512,9 @@ pub fn project_state_machines_from_graph(graph: &Graph) -> Vec<StateMachineModel
                     source,
                     target,
                     trigger: string_property_any(element, &["trigger", "event", "guard"]),
+                    trigger_kind: transition_trigger_kind(element),
+                    guard: element.properties.get("guard").cloned(),
+                    effect: string_property_any(element, &["effect", "effect_action"]),
                 });
         }
     }
@@ -228,6 +616,27 @@ fn bool_property(element: &Element, keys: &[&str]) -> bool {
     })
 }
 
+fn transition_trigger_kind(element: &Element) -> StateTransitionTriggerKind {
+    match string_property_any(element, &["trigger_kind", "triggerKind"])
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("event") => StateTransitionTriggerKind::Event,
+        Some("time") | Some("at") => StateTransitionTriggerKind::Time,
+        Some("after") | Some("duration") => StateTransitionTriggerKind::After,
+        Some("change") | Some("when") => StateTransitionTriggerKind::Change,
+        Some("completion") | Some("then") => StateTransitionTriggerKind::Completion,
+        _ => {
+            if string_property_any(element, &["trigger", "event"]).is_some() {
+                StateTransitionTriggerKind::Event
+            } else {
+                StateTransitionTriggerKind::Unknown
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -299,6 +708,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn executes_nested_state_transition_from_active_leaf() {
+        let runtime = Runtime::from_document(KirDocument {
+            metadata: BTreeMap::new(),
+            elements: vec![
+                state("state.Server.Active", "ServerBehavior", true, false),
+                nested_state(
+                    "state.Server.Active.Waiting",
+                    "ServerBehavior",
+                    "state.Server.Active",
+                    true,
+                    false,
+                ),
+                state("state.Server.Off", "ServerBehavior", false, false),
+                transition(
+                    "transition.Server.stop",
+                    "ServerBehavior",
+                    "state.Server.Active.Waiting",
+                    "state.Server.Off",
+                    "stop",
+                ),
+            ],
+        })
+        .unwrap();
+
+        let machines = project_state_machines(&runtime);
+        let report = machines[0].execute_scenario(&StateMachineScenario {
+            id: "scenario.stop".to_string(),
+            initial_state_id: None,
+            events: vec![StateMachineScenarioEvent {
+                id: "event.stop".to_string(),
+                trigger: "stop".to_string(),
+            }],
+            max_steps: 8,
+        });
+
+        assert_eq!(report.status, StateMachineExecutionStatus::Completed);
+        assert_eq!(report.active_configuration, vec!["state.Server.Off"]);
+        assert_eq!(
+            report.steps[0].transition_id.as_deref(),
+            Some("transition.Server.stop")
+        );
+    }
+
     fn state(id: &str, owner: &str, initial: bool, final_state: bool) -> KirElement {
         KirElement {
             id: id.to_string(),
@@ -338,6 +791,10 @@ mod tests {
                 ("source".to_string(), Value::String(source.to_string())),
                 ("target".to_string(), Value::String(target.to_string())),
                 ("trigger".to_string(), Value::String(trigger.to_string())),
+                (
+                    "trigger_kind".to_string(),
+                    Value::String("event".to_string()),
+                ),
             ]),
         }
     }
