@@ -1166,6 +1166,24 @@ fn enrich_usage_semantics(element: &mut KirElement, usage: &ResolvedUsage, owner
             }
         }
     }
+    if usage.construct == "AllocationUsage" {
+        if let Some(source) = &usage.allocation_source {
+            element
+                .properties
+                .insert("allocated".to_string(), Value::String(source.clone()));
+            element
+                .properties
+                .insert("source".to_string(), Value::String(source.clone()));
+        }
+        if let Some(target) = &usage.allocation_target {
+            element
+                .properties
+                .insert("allocated_to".to_string(), Value::String(target.clone()));
+            element
+                .properties
+                .insert("target".to_string(), Value::String(target.clone()));
+        }
+    }
     if usage.construct == "SuccessionUsage"
         && usage.modifiers.iter().any(|modifier| modifier == "then")
     {
@@ -1361,6 +1379,10 @@ fn transpile_usage_tree(
                 .properties
                 .insert("source".to_string(), Value::String(source_id.clone()));
         }
+        if usage.construct == "MetadataUsage" && !usage.metadata_properties.is_empty() {
+            let target_id = usage.reference_target.as_deref().unwrap_or(owner_id);
+            attach_metadata_application(elements, target_id, usage);
+        }
         elements.push(element);
         transpile_usage_tree(
             &usage.members,
@@ -1375,6 +1397,40 @@ fn transpile_usage_tree(
         }
     }
     Ok(())
+}
+
+fn attach_metadata_application(
+    elements: &mut [KirElement],
+    target_id: &str,
+    usage: &ResolvedUsage,
+) {
+    let Some(target) = elements.iter_mut().find(|element| element.id == target_id) else {
+        return;
+    };
+
+    let properties = usage
+        .metadata_properties
+        .iter()
+        .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+        .collect::<Map<_, _>>();
+    let mut annotation = Map::new();
+    annotation.insert(
+        "type".to_string(),
+        Value::String(usage.declared_name.clone()),
+    );
+    annotation.insert("properties".to_string(), Value::Object(properties));
+
+    let metadata = target
+        .properties
+        .entry("metadata".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !metadata.is_object() {
+        *metadata = Value::Object(Map::new());
+    }
+    let Some(metadata_object) = metadata.as_object_mut() else {
+        return;
+    };
+    metadata_object.insert(usage.declared_name.clone(), Value::Object(annotation));
 }
 
 fn render_sibling_usage_ids(
@@ -2156,6 +2212,7 @@ fn disambiguate_duplicate_source_position_usage_ids(elements: &mut [KirElement])
             || element.id.starts_with("assert.")
             || element.id.starts_with("assume.")
             || element.id.starts_with("require.")
+            || element.id.starts_with("reference.")
             || element.id.starts_with("transition.");
         if !disambiguate_by_source_position {
             continue;

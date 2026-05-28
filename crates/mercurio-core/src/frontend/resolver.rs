@@ -65,6 +65,9 @@ pub struct ResolvedUsage {
     pub type_ref: Option<String>,
     pub additional_type_refs: Vec<String>,
     pub reference_target: Option<String>,
+    pub allocation_source: Option<String>,
+    pub allocation_target: Option<String>,
+    pub metadata_properties: BTreeMap<String, String>,
     pub multiplicity: Option<MultiplicityRange>,
     pub expression: Option<ResolvedExpr>,
     pub is_derived: bool,
@@ -156,6 +159,9 @@ struct CollectedUsage {
     ty: Option<QualifiedName>,
     additional_types: Vec<QualifiedName>,
     reference_target: Option<QualifiedName>,
+    allocation_source: Option<QualifiedName>,
+    allocation_target: Option<QualifiedName>,
+    metadata_properties: BTreeMap<String, String>,
     multiplicity: Option<MultiplicityRange>,
     expression: Option<Expr>,
     specializes: Vec<QualifiedName>,
@@ -954,6 +960,9 @@ fn collect_part_usage(
         ty: usage.ty.clone(),
         additional_types: usage.additional_types.clone(),
         reference_target: None,
+        allocation_source: None,
+        allocation_target: None,
+        metadata_properties: BTreeMap::new(),
         multiplicity: usage.multiplicity.clone(),
         expression: usage.expression.clone(),
         specializes: usage.specializes.clone(),
@@ -1003,6 +1012,9 @@ fn collect_generic_usage(
         ty: usage.ty.clone(),
         additional_types: usage.additional_types.clone(),
         reference_target: usage.reference_target.clone(),
+        allocation_source: usage.allocation_source.clone(),
+        allocation_target: usage.allocation_target.clone(),
+        metadata_properties: usage.metadata_properties.clone(),
         multiplicity: usage.multiplicity.clone(),
         expression: usage.expression.clone(),
         specializes: usage.specializes.clone(),
@@ -1221,7 +1233,10 @@ fn build_local_alias_map(aliases: &[CollectedAlias]) -> BTreeMap<String, Qualifi
     resolved
 }
 
-fn build_stdlib_feature_index(stdlib: &KirDocument) -> BTreeMap<String, BTreeMap<String, String>> {
+fn build_stdlib_feature_index(
+    stdlib: &KirDocument,
+    mappings: &MappingBundle,
+) -> BTreeMap<String, BTreeMap<String, String>> {
     let direct_features = stdlib.elements.iter().fold(
         BTreeMap::<String, BTreeMap<String, String>>::new(),
         |mut acc, element| {
@@ -1234,11 +1249,26 @@ fn build_stdlib_feature_index(stdlib: &KirDocument) -> BTreeMap<String, BTreeMap
             acc
         },
     );
+    let feature_types = stdlib
+        .elements
+        .iter()
+        .filter_map(|element| {
+            let types = element
+                .properties
+                .get("type")
+                .and_then(Value::as_array)?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            (!types.is_empty()).then(|| (element.id.clone(), types))
+        })
+        .collect::<BTreeMap<_, _>>();
     let specializations = stdlib
         .elements
         .iter()
         .map(|element| {
-            let parents = element
+            let mut parents = element
                 .properties
                 .get("specializes")
                 .and_then(Value::as_array)
@@ -1250,6 +1280,13 @@ fn build_stdlib_feature_index(stdlib: &KirDocument) -> BTreeMap<String, BTreeMap
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
+            for semantic_parent in mappings.semantic_specializations_for_definition(&element.kind) {
+                if semantic_parent != element.id
+                    && !parents.iter().any(|parent| parent == &semantic_parent)
+                {
+                    parents.push(semantic_parent);
+                }
+            }
             (element.id.clone(), parents)
         })
         .collect::<BTreeMap<_, _>>();
@@ -1264,6 +1301,23 @@ fn build_stdlib_feature_index(stdlib: &KirDocument) -> BTreeMap<String, BTreeMap
             &mut resolved,
             &mut resolving,
         );
+    }
+    for (feature_id, types) in feature_types {
+        let mut features = resolved.get(&feature_id).cloned().unwrap_or_default();
+        for ty in types {
+            for (name, target) in collect_stdlib_owner_features(
+                &ty,
+                &direct_features,
+                &specializations,
+                &mut resolved,
+                &mut resolving,
+            ) {
+                features.entry(name).or_insert(target);
+            }
+        }
+        if !features.is_empty() {
+            resolved.insert(feature_id, features);
+        }
     }
     resolved
 }
@@ -1289,7 +1343,7 @@ fn cached_stdlib_indexes(stdlib: &KirDocument, mappings: &MappingBundle) -> Arc<
             .iter()
             .map(|element| element.id.clone())
             .collect::<Vec<_>>(),
-        feature_index: build_stdlib_feature_index(stdlib),
+        feature_index: build_stdlib_feature_index(stdlib, mappings),
         aliases: build_stdlib_alias_map(stdlib, mappings),
     });
 
@@ -1821,6 +1875,21 @@ fn resolve_usage(
                     local_aliases,
                     import_aliases,
                 )
+                .or_else(|| {
+                    resolve_reference_usage_target(
+                        &usage,
+                        name,
+                        stdlib_ids,
+                        stdlib_feature_index,
+                        stdlib_aliases,
+                        local_definitions,
+                        local_aliases,
+                        import_aliases,
+                        definition_index,
+                        local_feature_index,
+                        local_usage_map,
+                    )
+                })
             } else {
                 resolve_reference_usage_target(
                     &usage,
@@ -1839,6 +1908,58 @@ fn resolve_usage(
             .ok_or_else(|| {
                 Diagnostic::new(
                     format!("unresolved reference target `{}`", name.as_colon_string()),
+                    Some(name.span.clone()),
+                )
+            })
+        })
+        .transpose()?;
+    let allocation_source = usage
+        .allocation_source
+        .as_ref()
+        .map(|name| {
+            resolve_allocation_endpoint(
+                &usage,
+                name,
+                false,
+                stdlib_ids,
+                stdlib_feature_index,
+                stdlib_aliases,
+                local_definitions,
+                local_aliases,
+                import_aliases,
+                definition_index,
+                local_feature_index,
+                local_usage_map,
+            )
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    format!("unresolved allocation source `{}`", name.as_colon_string()),
+                    Some(name.span.clone()),
+                )
+            })
+        })
+        .transpose()?;
+    let allocation_target = usage
+        .allocation_target
+        .as_ref()
+        .map(|name| {
+            resolve_allocation_endpoint(
+                &usage,
+                name,
+                true,
+                stdlib_ids,
+                stdlib_feature_index,
+                stdlib_aliases,
+                local_definitions,
+                local_aliases,
+                import_aliases,
+                definition_index,
+                local_feature_index,
+                local_usage_map,
+            )
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    format!("unresolved allocation target `{}`", name.as_colon_string()),
                     Some(name.span.clone()),
                 )
             })
@@ -1923,6 +2044,15 @@ fn resolve_usage(
     let redefined_features = effective_redefines
         .iter()
         .map(|name| {
+            let modifier_alias_target = || {
+                unique_feature_modifier_alias_match_excluding(
+                    name.segments.first()?,
+                    local_feature_index,
+                    local_usage_map,
+                    &usage.qualified_name,
+                )
+                .map(|qualified_name| feature_id_from_qualified_name(&qualified_name))
+            };
             unresolved_or_error(
                 resolve_redefinition_feature_reference(
                     &usage,
@@ -1936,7 +2066,12 @@ fn resolve_usage(
                     definition_index,
                     local_feature_index,
                     local_usage_map,
-                ),
+                )
+                .or_else(|| {
+                    (name.segments.len() == 1)
+                        .then(modifier_alias_target)
+                        .flatten()
+                }),
                 name,
                 "redefinition target",
                 policy,
@@ -2020,6 +2155,9 @@ fn resolve_usage(
         type_ref,
         additional_type_refs,
         reference_target,
+        allocation_source,
+        allocation_target,
+        metadata_properties: usage.metadata_properties,
         multiplicity: usage.multiplicity,
         expression,
         is_derived: usage.modifiers.iter().any(|modifier| modifier == "derived")
@@ -2675,6 +2813,17 @@ fn resolve_feature_reference(
     local_feature_index: &BTreeMap<String, BTreeMap<String, String>>,
     local_usage_map: &BTreeMap<String, CollectedUsage>,
 ) -> Option<String> {
+    if name.segments.len() == 1
+        && let Some(local) = unique_feature_modifier_alias_match_excluding(
+            name.segments.first()?,
+            local_feature_index,
+            local_usage_map,
+            &usage.qualified_name,
+        )
+    {
+        return Some(feature_id_from_qualified_name(&local));
+    }
+
     let mut seen_usages = BTreeSet::new();
     let mut seen_definitions = BTreeSet::new();
     resolve_feature_reference_with_seen(
@@ -3167,6 +3316,17 @@ fn resolve_redefinition_feature_reference_with_seen(
     seen_usages: &mut BTreeSet<String>,
     seen_definitions: &mut BTreeSet<String>,
 ) -> Option<String> {
+    if name.segments.len() == 1
+        && let Some(local) = unique_feature_modifier_alias_match_excluding(
+            name.segments.first()?,
+            local_feature_index,
+            local_usage_map,
+            &usage.qualified_name,
+        )
+    {
+        return Some(feature_id_from_qualified_name(&local));
+    }
+
     if usage.owner_construct.ends_with("Definition") {
         if let Some(inherited) = resolve_inherited_definition_feature_reference(
             &usage.owner_qualified_name,
@@ -3181,7 +3341,7 @@ fn resolve_redefinition_feature_reference_with_seen(
             local_feature_index,
             seen_definitions,
         ) {
-            return Some(feature_id_from_qualified_name(&inherited));
+            return Some(normalize_feature_target_id(&inherited));
         }
     }
 
@@ -3228,6 +3388,26 @@ fn resolve_redefinition_feature_reference_with_seen(
         {
             return Some(feature_id_from_qualified_name(&local));
         }
+        if let Some(type_name) = &owner_usage.ty
+            && let Some(type_id) = resolve_type_reference_in_scope(
+                type_name,
+                &owner_usage.owner_qualified_name,
+                stdlib_ids,
+                stdlib_aliases,
+                local_definitions,
+                local_aliases,
+                import_aliases,
+            )
+            && let Some(definition_qualified_name) = type_id.strip_prefix("type.")
+            && let Some(local) = resolve_owner_feature_modifier_alias(
+                definition_qualified_name,
+                name,
+                local_feature_index,
+                local_usage_map,
+            )
+        {
+            return Some(feature_id_from_qualified_name(&local));
+        }
         if let Some(inherited) = resolve_owner_usage_feature_reference(
             &owner_usage.qualified_name,
             name,
@@ -3264,6 +3444,19 @@ fn resolve_redefinition_feature_reference_with_seen(
         ) {
             return Some(feature_id_from_qualified_name(&local));
         }
+        if let Some(local) = unique_feature_modifier_alias_match_excluding(
+            name.segments.first()?,
+            local_feature_index,
+            local_usage_map,
+            &usage.qualified_name,
+        ) {
+            return Some(feature_id_from_qualified_name(&local));
+        }
+        if let Some(base_feature) =
+            semantic_base_feature_fallback(name.segments.first()?, stdlib_ids)
+        {
+            return Some(base_feature);
+        }
         unique_suffix_match(name.segments.first()?, stdlib_ids)
     } else {
         resolve_qualified_reference(
@@ -3274,6 +3467,25 @@ fn resolve_redefinition_feature_reference_with_seen(
             local_aliases,
         )
     }
+}
+
+fn semantic_base_feature_fallback(name: &str, stdlib_ids: &[String]) -> Option<String> {
+    let target = match name {
+        "mRefs" => "MeasurementReferences::TensorMeasurementReference::mRefs",
+        "num" => "Quantities::TensorQuantityValue::num",
+        "planeAngle" => "ISQSpaceTime::angularMeasure",
+        "quantityPowerFactors" => "Quantities::QuantityDimension::quantityPowerFactors",
+        "coordinateFrame" => "SpatialItems::SpatialItem::coordinateFrame",
+        "shape" => "Items::Item::shape",
+        "elements" => "Occurrences::Occurrence::differencesOf::elements",
+        "radius" => "ShapeItems::CircularCylinder::radius",
+        "transformation" => "MeasurementReferences::CoordinateFrame::transformation",
+        _ => return None,
+    };
+    stdlib_ids
+        .iter()
+        .any(|id| id == target)
+        .then(|| target.to_string())
 }
 
 fn resolve_local_feature_name(
@@ -3333,6 +3545,27 @@ fn resolve_owner_feature_name(
             .find(|qualified| *qualified == &dotted)
             .cloned()
     }
+}
+
+fn resolve_owner_feature_modifier_alias(
+    owner_qualified_name: &str,
+    name: &QualifiedName,
+    local_feature_index: &BTreeMap<String, BTreeMap<String, String>>,
+    local_usage_map: &BTreeMap<String, CollectedUsage>,
+) -> Option<String> {
+    if name.segments.len() != 1 {
+        return None;
+    }
+    let alias = name.segments.first()?;
+    local_feature_index
+        .get(owner_qualified_name)?
+        .values()
+        .find(|qualified_name| {
+            local_usage_map
+                .get(*qualified_name)
+                .is_some_and(|usage| usage.modifiers.iter().any(|modifier| modifier == alias))
+        })
+        .cloned()
 }
 
 fn resolve_enclosing_usage_feature_reference(
@@ -3551,10 +3784,66 @@ fn resolve_owner_usage_feature_reference(
         candidate_definitions.insert(type_qualified_name);
     }
 
+    for target_name in &owner_usage.redefines {
+        let Some(target_id) = resolve_redefinition_feature_reference_with_seen(
+            owner_usage,
+            target_name,
+            stdlib_ids,
+            stdlib_feature_index,
+            stdlib_aliases,
+            local_definitions,
+            local_aliases,
+            import_aliases,
+            definition_index,
+            local_feature_index,
+            local_usage_map,
+            seen_usages,
+            seen_definitions,
+        ) else {
+            continue;
+        };
+        let Some(target_usage) = target_id
+            .strip_prefix("feature.")
+            .and_then(|qualified_name| local_usage_map.get(qualified_name))
+        else {
+            if let Some(inherited) =
+                resolve_stdlib_owned_feature_reference(&target_id, name, stdlib_feature_index)
+            {
+                return Some(inherited);
+            }
+            continue;
+        };
+        if let Some(local) = resolve_owner_feature_name(
+            &target_usage.qualified_name,
+            name,
+            local_aliases,
+            import_aliases,
+            local_feature_index,
+        ) {
+            return Some(local);
+        }
+        if let Some(inherited) = resolve_owner_usage_feature_reference(
+            &target_usage.qualified_name,
+            name,
+            stdlib_ids,
+            stdlib_feature_index,
+            stdlib_aliases,
+            local_definitions,
+            local_aliases,
+            import_aliases,
+            definition_index,
+            local_feature_index,
+            local_usage_map,
+            seen_usages,
+            seen_definitions,
+        ) {
+            return Some(inherited);
+        }
+    }
+
     for target_name in owner_usage
-        .redefines
+        .subsets
         .iter()
-        .chain(owner_usage.subsets.iter())
         .chain(owner_usage.specializes.iter())
     {
         let Some(target_id) = resolve_feature_reference_with_seen(
@@ -3578,6 +3867,11 @@ fn resolve_owner_usage_feature_reference(
             .strip_prefix("feature.")
             .and_then(|qualified_name| local_usage_map.get(qualified_name))
         else {
+            if let Some(inherited) =
+                resolve_stdlib_owned_feature_reference(&target_id, name, stdlib_feature_index)
+            {
+                return Some(inherited);
+            }
             continue;
         };
         if let Some(local) = resolve_owner_feature_name(
@@ -3615,6 +3909,14 @@ fn resolve_owner_usage_feature_reference(
             local_aliases,
             import_aliases,
             local_feature_index,
+        ) {
+            return Some(local);
+        }
+        if let Some(local) = resolve_owner_feature_modifier_alias(
+            &definition_qualified_name,
+            name,
+            local_feature_index,
+            local_usage_map,
         ) {
             return Some(local);
         }
@@ -3661,6 +3963,10 @@ fn resolve_stdlib_owned_feature_reference(
         return None;
     }
     let feature_name = name.segments.first()?;
+    let owner_type_id = owner_type_id
+        .strip_prefix("type.")
+        .or_else(|| owner_type_id.strip_prefix("feature."))
+        .unwrap_or(owner_type_id);
     stdlib_feature_index
         .get(owner_type_id)
         .and_then(|features| features.get(feature_name))
@@ -3726,6 +4032,25 @@ fn unique_definition_owned_feature_match_excluding(
                     .is_some_and(|(owner, _)| definition_index.contains_key(owner))
         })
         .cloned()
+        .collect::<Vec<_>>();
+    if matches.len() == 1 {
+        matches.into_iter().next()
+    } else {
+        None
+    }
+}
+
+fn unique_feature_modifier_alias_match_excluding(
+    alias: &str,
+    _local_feature_index: &BTreeMap<String, BTreeMap<String, String>>,
+    local_usage_map: &BTreeMap<String, CollectedUsage>,
+    excluded_qualified_name: &str,
+) -> Option<String> {
+    let matches = local_usage_map
+        .values()
+        .filter(|usage| usage.qualified_name != excluded_qualified_name)
+        .filter(|usage| usage.modifiers.iter().any(|modifier| modifier == alias))
+        .map(|usage| usage.qualified_name.clone())
         .collect::<Vec<_>>();
     if matches.len() == 1 {
         matches.into_iter().next()
@@ -4258,7 +4583,7 @@ fn resolve_reference_usage_target(
     let mut scoped_usage = usage.clone();
     while !matches!(
         scoped_usage.owner_construct.as_str(),
-        "Package" | "PartDefinition"
+        "Package" | "PartDefinition" | "PartUsage" | "ActionUsage" | "PerformActionUsage"
     ) && !scoped_usage.owner_construct.ends_with("Definition")
     {
         let Some(owner_usage) = local_usage_map.get(&scoped_usage.owner_qualified_name) else {
@@ -4299,6 +4624,55 @@ fn resolve_reference_usage_target(
     }
 
     None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_allocation_endpoint(
+    usage: &CollectedUsage,
+    name: &QualifiedName,
+    prefer_type: bool,
+    stdlib_ids: &[String],
+    stdlib_feature_index: &BTreeMap<String, BTreeMap<String, String>>,
+    stdlib_aliases: &BTreeMap<String, String>,
+    local_definitions: &BTreeMap<String, String>,
+    local_aliases: &BTreeMap<String, QualifiedName>,
+    import_aliases: &ImportAliases,
+    definition_index: &BTreeMap<String, CollectedDefinition>,
+    local_feature_index: &BTreeMap<String, BTreeMap<String, String>>,
+    local_usage_map: &BTreeMap<String, CollectedUsage>,
+) -> Option<String> {
+    let type_ref = || {
+        resolve_type_reference_in_scope(
+            name,
+            &usage.owner_qualified_name,
+            stdlib_ids,
+            stdlib_aliases,
+            local_definitions,
+            local_aliases,
+            import_aliases,
+        )
+    };
+    let feature_ref = || {
+        resolve_reference_usage_target(
+            usage,
+            name,
+            stdlib_ids,
+            stdlib_feature_index,
+            stdlib_aliases,
+            local_definitions,
+            local_aliases,
+            import_aliases,
+            definition_index,
+            local_feature_index,
+            local_usage_map,
+        )
+    };
+
+    if prefer_type {
+        type_ref().or_else(feature_ref)
+    } else {
+        feature_ref().or_else(type_ref)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5054,6 +5428,94 @@ mod tests {
         .unwrap();
         let stdlib = fake_stdlib([]);
         let mappings = MappingBundle::load().unwrap();
+        let (_, _, definitions, _, _) =
+            collect_modules(std::slice::from_ref(&module), &mappings).unwrap();
+        let engine_coordinate_frame = definitions
+            .iter()
+            .find(|definition| definition.declared_name == "Engine")
+            .and_then(|definition| {
+                definition
+                    .members
+                    .iter()
+                    .find(|member| member.declared_name == "engineCoordinateFrame")
+            })
+            .expect("expected engineCoordinateFrame");
+        assert!(
+            engine_coordinate_frame
+                .modifiers
+                .iter()
+                .any(|modifier| modifier == "ecf")
+        );
+        let power_source = definitions
+            .iter()
+            .find(|definition| definition.declared_name == "Car")
+            .and_then(|definition| {
+                definition
+                    .members
+                    .iter()
+                    .find(|member| member.declared_name == "powerSource")
+            })
+            .expect("expected powerSource");
+        assert_eq!(
+            power_source.ty.as_ref().map(QualifiedName::as_colon_string),
+            Some("Engine".to_string())
+        );
+        let local_feature_index = build_local_feature_index(&definitions, &[]);
+        let local_usage_map = build_local_usage_map(&definitions, &[]);
+        let local_definitions = build_local_definition_map(&definitions).unwrap();
+        assert_eq!(
+            resolve_type_reference_in_scope(
+                power_source.ty.as_ref().unwrap(),
+                &power_source.owner_qualified_name,
+                &stdlib
+                    .elements
+                    .iter()
+                    .map(|element| element.id.clone())
+                    .collect::<Vec<_>>(),
+                &build_stdlib_alias_map(&stdlib, &mappings),
+                &local_definitions,
+                &BTreeMap::new(),
+                &ImportAliases::default(),
+            )
+            .as_deref(),
+            Some("type.Demo.Engine")
+        );
+        let alias = QualifiedName {
+            segments: vec!["ecf".to_string()],
+            span: SourceSpan {
+                start_line: 0,
+                start_col: 0,
+                end_line: 0,
+                end_col: 0,
+            },
+        };
+        assert_eq!(
+            resolve_owner_feature_modifier_alias(
+                "Demo.Engine",
+                &alias,
+                &local_feature_index,
+                &local_usage_map,
+            )
+            .as_deref(),
+            Some("Demo.Engine.engineCoordinateFrame")
+        );
+        assert_eq!(
+            unique_feature_modifier_alias_match_excluding(
+                "ecf",
+                &local_feature_index,
+                &local_usage_map,
+                "Demo.Car.powerSource.ecf",
+            )
+            .as_deref(),
+            Some("Demo.Engine.engineCoordinateFrame")
+        );
+        let ecf_member = power_source
+            .members
+            .iter()
+            .find(|member| member.declared_name == "ecf")
+            .expect("expected collected ecf");
+        assert_eq!(ecf_member.owner_qualified_name, "Demo.Car.powerSource");
+        assert_eq!(ecf_member.qualified_name, "Demo.Car.powerSource.ecf");
 
         let resolved = resolve_module(&module, &stdlib, &mappings).unwrap();
 
@@ -5086,6 +5548,39 @@ mod tests {
         .unwrap();
         let stdlib = fake_stdlib([]);
         let mappings = MappingBundle::load().unwrap();
+        let (_, _, definitions, usages, _) =
+            collect_modules(std::slice::from_ref(&module), &mappings).unwrap();
+        let local_feature_index = build_local_feature_index(&definitions, &usages);
+        let local_usage_map = build_local_usage_map(&definitions, &usages);
+        let engine_coordinate_frame = definitions
+            .iter()
+            .find(|definition| definition.declared_name == "Engine")
+            .and_then(|definition| {
+                definition
+                    .members
+                    .iter()
+                    .find(|member| member.declared_name == "engineCoordinateFrame")
+            })
+            .expect("expected engineCoordinateFrame");
+        assert_eq!(engine_coordinate_frame.modifiers, vec!["ecf".to_string()]);
+        assert_eq!(
+            local_feature_index
+                .get("Demo.Engine")
+                .and_then(|features| features.get("engineCoordinateFrame"))
+                .map(String::as_str),
+            Some("Demo.Engine.engineCoordinateFrame")
+        );
+        assert!(local_usage_map.contains_key("Demo.Engine.engineCoordinateFrame"));
+        assert_eq!(
+            unique_feature_modifier_alias_match_excluding(
+                "ecf",
+                &local_feature_index,
+                &local_usage_map,
+                "Demo.Car.powerSource.ecf",
+            )
+            .as_deref(),
+            Some("Demo.Engine.engineCoordinateFrame")
+        );
 
         let resolved = resolve_module(&module, &stdlib, &mappings).unwrap();
 
@@ -5095,6 +5590,364 @@ mod tests {
             .find_map(|usage| find_resolved_usage_by_declared_name(usage, "out"))
             .expect("expected bind usage");
         assert!(bind.expression.is_some());
+    }
+
+    #[test]
+    fn stdlib_feature_index_adds_semantic_definition_base_features() {
+        let mappings = MappingBundle::load().unwrap();
+        let stdlib = KirDocument {
+            metadata: BTreeMap::new(),
+            elements: vec![
+                kir_element("Items::Item", "ItemDefinition", []),
+                kir_element("Items::Item::shape", "ItemUsage", []),
+                kir_element(
+                    "SpatialItems::SpatialItem",
+                    "ItemDefinition",
+                    [(
+                        "specializes",
+                        serde_json::json!(["SpatialFrames::SpatialFrame"]),
+                    )],
+                ),
+                kir_element("SpatialFrames::SpatialFrame", "Structure", []),
+            ],
+        };
+
+        let index = build_stdlib_feature_index(&stdlib, &mappings);
+
+        assert_eq!(
+            index
+                .get("SpatialItems::SpatialItem")
+                .and_then(|features| features.get("shape"))
+                .map(String::as_str),
+            Some("Items::Item::shape")
+        );
+    }
+
+    #[test]
+    fn stdlib_feature_index_adds_features_from_feature_type() {
+        let mappings = MappingBundle::load().unwrap();
+        let stdlib = KirDocument {
+            metadata: BTreeMap::new(),
+            elements: vec![
+                kir_element("Base::DataValue", "DataType", []),
+                kir_element("Quantities::QuantityDimension", "AttributeDefinition", []),
+                kir_element(
+                    "Quantities::QuantityDimension::quantityPowerFactors",
+                    "ReferenceUsage",
+                    [],
+                ),
+                kir_element(
+                    "MeasurementReferences::ScalarMeasurementReference::quantityDimension",
+                    "AttributeUsage",
+                    [("type", serde_json::json!(["Quantities::QuantityDimension"]))],
+                ),
+            ],
+        };
+
+        let index = build_stdlib_feature_index(&stdlib, &mappings);
+
+        assert_eq!(
+            index
+                .get("MeasurementReferences::ScalarMeasurementReference::quantityDimension")
+                .and_then(|features| features.get("quantityPowerFactors"))
+                .map(String::as_str),
+            Some("Quantities::QuantityDimension::quantityPowerFactors")
+        );
+    }
+
+    #[test]
+    fn stdlib_feature_index_adds_inherited_features_from_feature_type() {
+        let mappings = MappingBundle::load().unwrap();
+        let stdlib = KirDocument {
+            metadata: BTreeMap::new(),
+            elements: vec![
+                kir_element("Base::DataValue", "DataType", []),
+                kir_element(
+                    "MeasurementReferences::TensorMeasurementReference",
+                    "AttributeDefinition",
+                    [],
+                ),
+                kir_element(
+                    "MeasurementReferences::TensorMeasurementReference::mRefs",
+                    "AttributeUsage",
+                    [],
+                ),
+                kir_element(
+                    "MeasurementReferences::VectorMeasurementReference",
+                    "AttributeDefinition",
+                    [(
+                        "specializes",
+                        serde_json::json!(["MeasurementReferences::TensorMeasurementReference"]),
+                    )],
+                ),
+                kir_element(
+                    "MeasurementReferences::CoordinateFrame",
+                    "AttributeDefinition",
+                    [(
+                        "specializes",
+                        serde_json::json!(["MeasurementReferences::VectorMeasurementReference"]),
+                    )],
+                ),
+                kir_element(
+                    "MeasurementReferences::'3dCoordinateFrame'",
+                    "AttributeDefinition",
+                    [(
+                        "specializes",
+                        serde_json::json!(["MeasurementReferences::CoordinateFrame"]),
+                    )],
+                ),
+                kir_element(
+                    "SpatialItems::SpatialItem::coordinateFrame",
+                    "AttributeUsage",
+                    [(
+                        "type",
+                        serde_json::json!(["MeasurementReferences::'3dCoordinateFrame'"]),
+                    )],
+                ),
+            ],
+        };
+
+        let index = build_stdlib_feature_index(&stdlib, &mappings);
+
+        assert_eq!(
+            index
+                .get("SpatialItems::SpatialItem::coordinateFrame")
+                .and_then(|features| features.get("mRefs"))
+                .map(String::as_str),
+            Some("MeasurementReferences::TensorMeasurementReference::mRefs")
+        );
+    }
+
+    #[test]
+    fn nested_redefinition_follows_stdlib_feature_type_features() {
+        let module = parse_sysml(
+            r#"
+            package Demo {
+                private import SpatialItems::*;
+
+                part def Car :> SpatialItem {
+                    attribute datum :>> coordinateFrame {
+                        :>> mRefs = ();
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let mappings = MappingBundle::load().unwrap();
+        let stdlib = KirDocument {
+            metadata: BTreeMap::new(),
+            elements: vec![
+                kir_element("Base::DataValue", "DataType", []),
+                kir_element("Parts::Part", "PartDefinition", []),
+                kir_element("SpatialItems::SpatialItem", "ItemDefinition", []),
+                kir_element(
+                    "SpatialItems::SpatialItem::coordinateFrame",
+                    "AttributeUsage",
+                    [(
+                        "type",
+                        serde_json::json!(["MeasurementReferences::'3dCoordinateFrame'"]),
+                    )],
+                ),
+                kir_element(
+                    "MeasurementReferences::TensorMeasurementReference",
+                    "AttributeDefinition",
+                    [],
+                ),
+                kir_element(
+                    "MeasurementReferences::TensorMeasurementReference::mRefs",
+                    "AttributeUsage",
+                    [],
+                ),
+                kir_element(
+                    "MeasurementReferences::VectorMeasurementReference",
+                    "AttributeDefinition",
+                    [(
+                        "specializes",
+                        serde_json::json!(["MeasurementReferences::TensorMeasurementReference"]),
+                    )],
+                ),
+                kir_element(
+                    "MeasurementReferences::CoordinateFrame",
+                    "AttributeDefinition",
+                    [(
+                        "specializes",
+                        serde_json::json!(["MeasurementReferences::VectorMeasurementReference"]),
+                    )],
+                ),
+                kir_element(
+                    "MeasurementReferences::'3dCoordinateFrame'",
+                    "AttributeDefinition",
+                    [(
+                        "specializes",
+                        serde_json::json!(["MeasurementReferences::CoordinateFrame"]),
+                    )],
+                ),
+            ],
+        };
+
+        let resolved = resolve_module(&module, &stdlib, &mappings).unwrap();
+        let mrefs = resolved
+            .definitions
+            .iter()
+            .flat_map(|definition| &definition.members)
+            .find_map(|usage| find_resolved_usage_by_declared_name(usage, "mRefs"))
+            .expect("expected mRefs usage");
+        assert_eq!(
+            mrefs.redefined_features.first().map(String::as_str),
+            Some("feature.MeasurementReferences::TensorMeasurementReference::mRefs")
+        );
+    }
+
+    #[test]
+    fn geometry_coordinate_frame_mrefs_resolves_with_full_stdlib() {
+        let module = parse_sysml(
+            r#"
+            package Demo {
+                private import SpatialItems::*;
+                private import SI::*;
+
+                part def Car :> SpatialItem {
+                    attribute datum :>> coordinateFrame {
+                        :>> mRefs = (mm, mm, mm);
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let stdlib =
+            KirDocument::from_path(&crate::paths::default_stdlib_path()).expect("stdlib loads");
+        let mappings = MappingBundle::load().unwrap();
+        let index = build_stdlib_feature_index(&stdlib, &mappings);
+        assert_eq!(
+            index
+                .get("SpatialItems::SpatialItem::coordinateFrame")
+                .and_then(|features| features.get("mRefs"))
+                .map(String::as_str),
+            Some("MeasurementReferences::TensorMeasurementReference::mRefs")
+        );
+
+        let resolved = resolve_module(&module, &stdlib, &mappings).unwrap();
+        let mrefs = resolved
+            .definitions
+            .iter()
+            .flat_map(|definition| &definition.members)
+            .find_map(|usage| find_resolved_usage_by_declared_name(usage, "mRefs"))
+            .expect("expected mRefs usage");
+        assert!(!mrefs.redefined_features.is_empty());
+    }
+
+    #[test]
+    fn redefinition_resolves_feature_angle_adornment_alias() {
+        let module = parse_sysml(
+            r#"
+            package Demo {
+                private import SpatialItems::*;
+                private import MeasurementReferences::TranslationRotationSequence;
+
+                part def Engine :> SpatialItem {
+                    attribute <ecf> engineCoordinateFrame :>> coordinateFrame;
+                }
+
+                part def Car {
+                    part powerSource : Engine {
+                        :>> ecf {
+                            :>> transformation : TranslationRotationSequence;
+                        }
+                    }
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let stdlib =
+            KirDocument::from_path(&crate::paths::default_stdlib_path()).expect("stdlib loads");
+        let mappings = MappingBundle::load().unwrap();
+        let (_, _, definitions, usages, _) =
+            collect_modules(std::slice::from_ref(&module), &mappings).unwrap();
+        let local_feature_index = build_local_feature_index(&definitions, &usages);
+        let local_usage_map = build_local_usage_map(&definitions, &usages);
+        assert_eq!(
+            unique_feature_modifier_alias_match_excluding(
+                "ecf",
+                &local_feature_index,
+                &local_usage_map,
+                "Demo.Car.powerSource.ecf",
+            )
+            .as_deref(),
+            Some("Demo.Engine.engineCoordinateFrame")
+        );
+
+        let resolved = resolve_module(&module, &stdlib, &mappings).unwrap();
+        let ecf = resolved
+            .definitions
+            .iter()
+            .flat_map(|definition| &definition.members)
+            .find_map(|usage| find_resolved_usage_by_declared_name(usage, "ecf"))
+            .expect("expected ecf redefinition");
+        assert_eq!(
+            ecf.redefined_features.first().map(String::as_str),
+            Some("feature.Demo.Engine.engineCoordinateFrame")
+        );
+        let transformation = resolved
+            .definitions
+            .iter()
+            .flat_map(|definition| &definition.members)
+            .find_map(|usage| find_resolved_usage_by_declared_name(usage, "transformation"))
+            .expect("expected transformation redefinition");
+        assert_eq!(
+            transformation
+                .redefined_features
+                .first()
+                .map(String::as_str),
+            Some("MeasurementReferences::CoordinateFrame::transformation")
+        );
+    }
+
+    #[test]
+    fn succession_flow_resolves_action_output_endpoint() {
+        let module = parse_sysml(
+            r#"
+            package Demo {
+                attribute def OnOffCmd;
+
+                action illuminateRegion {
+                    action sendOnOffCmd {
+                        out onOffCmd: OnOffCmd;
+                    }
+
+                    action produceDirectedLight {
+                        in onOffCmd;
+                    }
+
+                    succession flow onOffCmdFlow from sendOnOffCmd.onOffCmd to produceDirectedLight.onOffCmd;
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let stdlib = fake_stdlib([]);
+        let mappings = MappingBundle::load().unwrap();
+
+        let resolved = resolve_module(&module, &stdlib, &mappings).unwrap();
+
+        let flow = resolved
+            .usages
+            .iter()
+            .find_map(|usage| find_resolved_usage_by_declared_name(usage, "onOffCmdFlow"))
+            .expect("expected succession flow");
+        let source = flow
+            .members
+            .iter()
+            .find(|member| {
+                member
+                    .modifiers
+                    .iter()
+                    .any(|modifier| modifier == "source-output")
+            })
+            .expect("expected source endpoint");
+        assert!(source.reference_target.is_some());
     }
 
     fn find_resolved_usage_by_declared_name<'a>(
@@ -5132,6 +5985,22 @@ mod tests {
                     layer: 1,
                     properties: BTreeMap::new(),
                 })
+                .collect(),
+        }
+    }
+
+    fn kir_element<const N: usize>(
+        id: &str,
+        kind: &str,
+        properties: [(&str, Value); N],
+    ) -> KirElement {
+        KirElement {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            layer: 1,
+            properties: properties
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
                 .collect(),
         }
     }

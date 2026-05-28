@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::frontend::ast::{
@@ -8,8 +9,8 @@ use crate::frontend::ast::{
 use crate::frontend::diagnostics::Diagnostic;
 use crate::frontend::lexer::{Token, TokenKind, lex};
 use crate::frontend::resolver::{
-    ResolverContext, resolve_module, resolve_module_with_context,
-    resolve_module_with_resolver_context,
+    ResolvedDefinition, ResolvedModule, ResolvedUsage, ResolverContext, resolve_module,
+    resolve_module_with_context, resolve_module_with_resolver_context,
 };
 use crate::frontend::transpile::{MappingBundle, transpile_module};
 use crate::ir::KirDocument;
@@ -118,6 +119,7 @@ pub fn compile_sysml_module(
 
     let resolve_start = compile_timer_start();
     let resolved = resolve_module(module, stdlib, &mappings)?;
+    validate_metadata_usages(&resolved)?;
     log_compile_timed_event(
         "sysml.compile.resolve",
         resolve_start,
@@ -394,6 +396,7 @@ pub fn compile_sysml_module_with_context(
 
     let resolve_start = compile_timer_start();
     let resolved = resolve_module_with_context(module, context_modules, stdlib, &mappings)?;
+    validate_metadata_usages(&resolved)?;
     log_compile_timed_event(
         "sysml.compile.resolve",
         resolve_start,
@@ -428,6 +431,7 @@ pub(crate) fn compile_sysml_module_with_resolver_context(
 ) -> Result<KirDocument, Diagnostic> {
     let resolve_start = compile_timer_start();
     let resolved = resolve_module_with_resolver_context(module, resolver_context, mappings)?;
+    validate_metadata_usages(&resolved)?;
     log_compile_timed_event(
         "sysml.compile.resolve",
         resolve_start,
@@ -452,6 +456,113 @@ pub(crate) fn compile_sysml_module_with_resolver_context(
         ),
     );
     Ok(document)
+}
+
+fn validate_metadata_usages(resolved: &ResolvedModule) -> Result<(), Diagnostic> {
+    let metadata_definitions = resolved
+        .definitions
+        .iter()
+        .filter(|definition| definition.construct == "MetadataDefinition")
+        .collect::<Vec<_>>();
+    if metadata_definitions.is_empty() {
+        return Ok(());
+    }
+
+    for usage in all_resolved_usages(resolved) {
+        if usage.construct != "MetadataUsage" || usage.metadata_properties.is_empty() {
+            continue;
+        }
+        let Some(definition) = find_metadata_definition(&metadata_definitions, usage) else {
+            continue;
+        };
+        let attributes = definition
+            .members
+            .iter()
+            .filter(|member| member.construct == "AttributeUsage")
+            .map(|member| (member.declared_name.as_str(), member))
+            .collect::<BTreeMap<_, _>>();
+
+        for (property_name, property_value) in &usage.metadata_properties {
+            let Some(attribute) = attributes.get(property_name.as_str()) else {
+                return Err(Diagnostic::new(
+                    format!(
+                        "metadata property `{}` is not declared as an attribute of metadata definition `{}`",
+                        property_name, definition.declared_name
+                    ),
+                    Some(usage.span.clone()),
+                ));
+            };
+
+            if let Some(type_ref) = attribute.type_ref.as_deref()
+                && let Some(enum_definition) = find_definition_by_type_ref(resolved, type_ref)
+                && enum_definition.construct == "EnumerationDefinition"
+                && !enum_definition.members.iter().any(|member| {
+                    member.construct == "EnumerationUsage"
+                        && member.declared_name == *property_value
+                })
+            {
+                return Err(Diagnostic::new(
+                    format!(
+                        "metadata property `{}` value `{}` is not a member of enumeration `{}`",
+                        property_name, property_value, enum_definition.declared_name
+                    ),
+                    Some(usage.span.clone()),
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn all_resolved_usages(resolved: &ResolvedModule) -> Vec<&ResolvedUsage> {
+    let mut usages = Vec::new();
+    for usage in &resolved.usages {
+        collect_resolved_usage_tree(usage, &mut usages);
+    }
+    for definition in &resolved.definitions {
+        for usage in &definition.members {
+            collect_resolved_usage_tree(usage, &mut usages);
+        }
+    }
+    usages
+}
+
+fn collect_resolved_usage_tree<'a>(usage: &'a ResolvedUsage, usages: &mut Vec<&'a ResolvedUsage>) {
+    usages.push(usage);
+    for member in &usage.members {
+        collect_resolved_usage_tree(member, usages);
+    }
+}
+
+fn find_metadata_definition<'a>(
+    definitions: &'a [&ResolvedDefinition],
+    usage: &ResolvedUsage,
+) -> Option<&'a ResolvedDefinition> {
+    definitions.iter().copied().find(|definition| {
+        definition.declared_name == usage.declared_name
+            || definition.qualified_name == usage.declared_name
+            || definition
+                .qualified_name
+                .rsplit('.')
+                .next()
+                .is_some_and(|short_name| short_name == usage.declared_name)
+    })
+}
+
+fn find_definition_by_type_ref<'a>(
+    resolved: &'a ResolvedModule,
+    type_ref: &str,
+) -> Option<&'a ResolvedDefinition> {
+    let normalized = type_ref.strip_prefix("type.").unwrap_or(type_ref);
+    resolved.definitions.iter().find(|definition| {
+        definition.qualified_name == normalized
+            || format!("type.{}", definition.qualified_name) == type_ref
+            || normalized
+                .rsplit('.')
+                .next()
+                .is_some_and(|short_name| short_name == definition.declared_name)
+    })
 }
 
 fn replace_equivalent_context_module(
@@ -794,6 +905,9 @@ impl Parser {
             is_implicit_name: false,
             ty: tail.ty,
             reference_target: None,
+            allocation_source: None,
+            allocation_target: None,
+            metadata_properties: Default::default(),
             multiplicity: tail.multiplicity,
             expression: tail.expression,
             additional_types: tail.additional_types,
@@ -901,7 +1015,7 @@ impl Parser {
         second_keyword: &str,
         canonical_keyword: &str,
         docs: Vec<String>,
-        modifiers: Vec<String>,
+        mut modifiers: Vec<String>,
     ) -> Result<Declaration, Diagnostic> {
         let start =
             self.expect_identifier_named(first_keyword, &format!("expected `{first_keyword}`"))?;
@@ -909,6 +1023,9 @@ impl Parser {
             second_keyword,
             &format!("expected `{second_keyword}` after `{first_keyword}`"),
         )?;
+        if second_keyword == "constraint" {
+            modifiers.push("constraint".to_string());
+        }
         let is_definition = matches!(self.peek_kind(), TokenKind::Def);
         if is_definition {
             self.advance();
@@ -943,6 +1060,9 @@ impl Parser {
             is_implicit_name: true,
             ty: tail.ty,
             reference_target,
+            allocation_source: None,
+            allocation_target: None,
+            metadata_properties: Default::default(),
             multiplicity: tail.multiplicity,
             expression: tail.expression,
             additional_types: tail.additional_types,
@@ -1010,6 +1130,9 @@ impl Parser {
             is_implicit_name: false,
             ty: None,
             reference_target: None,
+            allocation_source: None,
+            allocation_target: None,
+            metadata_properties: Default::default(),
             multiplicity: None,
             expression: None,
             additional_types: Vec::new(),
@@ -1118,11 +1241,12 @@ impl Parser {
         } else {
             None
         };
-        let end = match self.peek_kind() {
+        let (metadata_properties, end) = match self.peek_kind() {
             TokenKind::Semicolon => {
-                self.expect(TokenKind::Semicolon, "expected `;` after annotation")?
+                let end = self.expect(TokenKind::Semicolon, "expected `;` after annotation")?;
+                (BTreeMap::new(), end)
             }
-            TokenKind::LBrace => self.consume_opaque_block_with_open()?,
+            TokenKind::LBrace => self.parse_metadata_properties_body()?,
             _ => return Err(self.error_here("expected `;` or body after annotation")),
         };
 
@@ -1132,6 +1256,9 @@ impl Parser {
             is_implicit_name: false,
             ty: None,
             reference_target,
+            allocation_source: None,
+            allocation_target: None,
+            metadata_properties,
             multiplicity: None,
             expression: None,
             additional_types: Vec::new(),
@@ -1143,6 +1270,89 @@ impl Parser {
             modifiers,
             span: merge_span(&start.span, &end.span),
         }))
+    }
+
+    fn parse_metadata_properties_body(
+        &mut self,
+    ) -> Result<(BTreeMap<String, String>, Token), Diagnostic> {
+        self.expect(TokenKind::LBrace, "expected `{` after annotation")?;
+        let mut properties = BTreeMap::new();
+
+        loop {
+            match self.peek_kind() {
+                TokenKind::RBrace => {
+                    let end =
+                        self.expect(TokenKind::RBrace, "expected `}` after annotation body")?;
+                    return Ok((properties, end));
+                }
+                TokenKind::Eof => return Err(self.error_here("unterminated annotation body")),
+                TokenKind::Identifier(_) if matches!(self.next_kind(), Some(TokenKind::Equals)) => {
+                    let key = self.expect_identifier("expected metadata property name")?;
+                    self.expect(
+                        TokenKind::Equals,
+                        "expected `=` after metadata property name",
+                    )?;
+                    let value = self.parse_metadata_property_value()?;
+                    properties.insert(key, value);
+                    if matches!(self.peek_kind(), TokenKind::Semicolon | TokenKind::Comma) {
+                        self.advance();
+                    }
+                }
+                TokenKind::LBrace => {
+                    self.consume_opaque_block_with_open()?;
+                }
+                TokenKind::Semicolon | TokenKind::Comma => self.advance(),
+                _ => self.advance(),
+            }
+        }
+    }
+
+    fn parse_metadata_property_value(&mut self) -> Result<String, Diagnostic> {
+        let mut parts = Vec::new();
+        let mut depth = 0usize;
+
+        loop {
+            match self.peek_kind() {
+                TokenKind::Eof => {
+                    return Err(self.error_here("unterminated metadata property value"));
+                }
+                TokenKind::Semicolon | TokenKind::Comma | TokenKind::RBrace if depth == 0 => break,
+                TokenKind::LBrace if depth == 0 => break,
+                TokenKind::LParen | TokenKind::LBracket | TokenKind::LAngle => {
+                    depth += 1;
+                    parts.push(token_text(self.peek_kind()));
+                    self.advance();
+                }
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RAngle => {
+                    depth = depth.saturating_sub(1);
+                    parts.push(token_text(self.peek_kind()));
+                    self.advance();
+                }
+                TokenKind::String(value) => {
+                    let value = value.clone();
+                    self.advance();
+                    return Ok(value);
+                }
+                TokenKind::Identifier(value) | TokenKind::Number(value) => {
+                    parts.push(value.clone());
+                    self.advance();
+                }
+                kind => {
+                    let text = token_text(kind);
+                    if !text.is_empty() {
+                        parts.push(text);
+                    }
+                    self.advance();
+                }
+            }
+        }
+
+        let value = parts.join("");
+        Ok(value
+            .rsplit([':', '.'])
+            .find(|part| !part.is_empty())
+            .unwrap_or(value.as_str())
+            .to_string())
     }
 
     fn parse_feature_declaration(
@@ -1202,9 +1412,9 @@ impl Parser {
         keyword: &str,
         start: Token,
         docs: Vec<String>,
-        modifiers: Vec<String>,
+        mut modifiers: Vec<String>,
     ) -> Result<Declaration, Diagnostic> {
-        self.consume_angle_adornments()?;
+        modifiers.extend(self.consume_angle_adornments()?);
         let name = self.expect_identifier(&format!("expected {keyword} definition name"))?;
         self.consume_suffix_adornments()?;
         let mut specializes = Vec::new();
@@ -1266,7 +1476,7 @@ impl Parser {
         docs: Vec<String>,
         mut modifiers: Vec<String>,
     ) -> Result<Declaration, Diagnostic> {
-        self.consume_angle_adornments()?;
+        modifiers.extend(self.consume_angle_adornments()?);
         if keyword == "comment" {
             return self.parse_comment_usage_after_keyword(start, docs, modifiers);
         }
@@ -1277,6 +1487,9 @@ impl Parser {
         let mut synthetic_body_members = Vec::new();
         let mut force_implicit_name = false;
         let mut leading_specialization = None;
+        let mut allocation_source = None;
+        let mut allocation_target = None;
+        let mut explicit_reference_target = None;
 
         let explicit_name = if keyword == "accept"
             && matches!(self.peek_kind(), TokenKind::Identifier(value) if value == "at" || value == "when" || value == "after")
@@ -1457,12 +1670,28 @@ impl Parser {
             && matches!(self.peek_kind(), TokenKind::Identifier(value) if value == "requirement")
         {
             self.expect_identifier_named("requirement", "expected `requirement` after `satisfy`")?;
-            Some(self.expect_identifier("expected satisfy requirement name")?)
+            explicit_reference_target =
+                Some(self.parse_qualified_name()?);
+            Some("satisfy".to_string())
+        } else if keyword == "satisfy" && matches!(self.peek_kind(), TokenKind::Identifier(_)) {
+            explicit_reference_target =
+                Some(self.parse_qualified_name()?);
+            Some("satisfy".to_string())
         } else if keyword == "exhibit"
             && matches!(self.peek_kind(), TokenKind::Identifier(value) if value == "state")
         {
             self.expect_identifier_named("state", "expected `state` after `exhibit`")?;
             Some(self.expect_identifier("expected exhibit state name")?)
+        } else if keyword == "allocation"
+            && matches!(self.peek_kind(), TokenKind::Identifier(_))
+            && matches!(self.next_kind(), Some(TokenKind::Identifier(value)) if value == "allocate")
+        {
+            let name = self.expect_identifier("expected allocation declaration name")?;
+            self.expect_identifier_named("allocate", "expected `allocate` after allocation name")?;
+            allocation_source = Some(self.parse_qualified_name()?);
+            self.expect_identifier_named("to", "expected `to` between allocation ends")?;
+            allocation_target = Some(self.parse_qualified_name()?);
+            Some(name)
         } else if matches!(
             self.peek_kind(),
             TokenKind::LBrace
@@ -1538,9 +1767,14 @@ impl Parser {
         let end = self.finish_usage(&effective_keyword, tail.had_body)?;
         let span = merge_span(&start.span, &end.span);
         let has_type = tail.ty.is_some();
-        let reference_target =
-            infer_reference_target(&effective_keyword, &name, has_type, &mut tail).or_else(|| {
-                if effective_keyword == "require" && tail.ty.is_none() && name != "constraint" {
+        let reference_target = explicit_reference_target.or_else(|| {
+            infer_reference_target(&effective_keyword, &name, has_type, &mut tail)
+        }).or_else(|| {
+                if effective_keyword == "require"
+                    && tail.ty.is_none()
+                    && name != "constraint"
+                    && !modifiers.iter().any(|modifier| modifier == "constraint")
+                {
                     Some(QualifiedName {
                         segments: vec![name.clone()],
                         span: span.clone(),
@@ -1572,6 +1806,9 @@ impl Parser {
                 is_implicit_name,
                 ty: tail.ty,
                 reference_target,
+                allocation_source,
+                allocation_target,
+                metadata_properties: Default::default(),
                 multiplicity: tail.multiplicity,
                 expression: tail.expression,
                 additional_types: tail.additional_types,
@@ -1655,6 +1892,9 @@ impl Parser {
             is_implicit_name,
             ty: None,
             reference_target: None,
+            allocation_source: None,
+            allocation_target: None,
+            metadata_properties: Default::default(),
             multiplicity: None,
             expression: None,
             additional_types: Vec::new(),
@@ -1719,6 +1959,9 @@ impl Parser {
             is_implicit_name,
             ty: None,
             reference_target: None,
+            allocation_source: None,
+            allocation_target: None,
+            metadata_properties: Default::default(),
             multiplicity: None,
             expression: None,
             additional_types: Vec::new(),
@@ -1749,6 +1992,9 @@ impl Parser {
             is_implicit_name: false,
             ty: tail.ty,
             reference_target: None,
+            allocation_source: None,
+            allocation_target: None,
+            metadata_properties: Default::default(),
             multiplicity: tail.multiplicity,
             expression: tail.expression,
             additional_types: tail.additional_types,
@@ -2386,6 +2632,9 @@ impl Parser {
             is_implicit_name: false,
             ty: None,
             reference_target: Some(reference_target),
+            allocation_source: None,
+            allocation_target: None,
+            metadata_properties: Default::default(),
             multiplicity: None,
             expression: None,
             additional_types: Vec::new(),
@@ -2464,6 +2713,7 @@ impl Parser {
                 TokenKind::Package
                 | TokenKind::Import
                 | TokenKind::Part
+                | TokenKind::At
                 | TokenKind::Specializes
                 | TokenKind::Redefines,
             ) => true,
@@ -2488,7 +2738,8 @@ impl Parser {
                             | TokenKind::LBrace
                             | TokenKind::Semicolon
                     )
-                ) || matches!(next_kind, Some(TokenKind::LBracket) if value == "connect" || value == "end")
+                ) || matches!(next_kind, Some(TokenKind::LAngle) if is_feature_keyword(value))
+                    || matches!(next_kind, Some(TokenKind::LBracket) if value == "connect" || value == "end")
                     || matches!(next_kind, Some(TokenKind::Doc(_)) if value == "comment")
             }
             _ => false,
@@ -2599,11 +2850,25 @@ impl Parser {
         }
     }
 
-    fn consume_angle_adornments(&mut self) -> Result<(), Diagnostic> {
+    fn consume_angle_adornments(&mut self) -> Result<Vec<String>, Diagnostic> {
+        let mut adornments = Vec::new();
         while matches!(self.peek_kind(), TokenKind::LAngle) {
-            self.consume_balanced(TokenKind::LAngle, TokenKind::RAngle)?;
+            self.expect(TokenKind::LAngle, "expected `<` before adornment")?;
+            let mut parts = Vec::new();
+            while !matches!(self.peek_kind(), TokenKind::RAngle | TokenKind::Eof) {
+                let token = self.current().clone();
+                let text = token_text(&token.kind);
+                if !text.is_empty() && text != "," {
+                    parts.push(text);
+                }
+                self.advance();
+            }
+            self.expect(TokenKind::RAngle, "expected `>` after adornment")?;
+            if !parts.is_empty() {
+                adornments.push(parts.join(""));
+            }
         }
-        Ok(())
+        Ok(adornments)
     }
 
     fn consume_suffix_adornments(&mut self) -> Result<Option<MultiplicityRange>, Diagnostic> {
@@ -3099,6 +3364,9 @@ fn synthetic_reference_usage(
         is_implicit_name: false,
         ty,
         reference_target,
+        allocation_source: None,
+        allocation_target: None,
+        metadata_properties: Default::default(),
         multiplicity: None,
         expression: None,
         additional_types: Vec::new(),
@@ -4549,6 +4817,122 @@ mod tests {
     }
 
     #[test]
+    fn semantic_compile_preserves_requirement_metadata_application_properties() {
+        let stdlib = load_model_stack(&crate::paths::default_stdlib_path()).unwrap();
+        let text = r#"
+                package RequirementStatusExample {
+                    enum def RequirementStatusKind {
+                        enum draft;
+                        enum approved;
+                        enum retired;
+                    }
+                    metadata def RequirementLifecycle {
+                        attribute status : RequirementStatusKind;
+                        attribute owner : String;
+                        attribute reviewDate : String;
+                    }
+                    requirement <'REQ-001'> safeStart {
+                        doc /* Vehicle shall prevent unsafe starts. */
+                        @RequirementLifecycle {
+                            status = RequirementStatusKind::approved;
+                            owner = "Safety Team";
+                            reviewDate = "2026-05-27";
+                        }
+                    }
+                }
+"#;
+        let report = compile_sysml_text_with_context_report(
+            text,
+            "requirements-metadata.sysml",
+            &[],
+            &stdlib,
+        );
+        assert_eq!(report.status, SemanticCompileStatus::Ok);
+        let document = report.document.unwrap();
+        let requirement = document
+            .elements
+            .iter()
+            .find(|element| element.id == "requirement.RequirementStatusExample.safeStart")
+            .unwrap();
+
+        assert_eq!(
+            requirement.properties["metadata"]["RequirementLifecycle"]["properties"]["status"],
+            serde_json::json!("approved")
+        );
+        assert_eq!(
+            requirement.properties["metadata"]["RequirementLifecycle"]["properties"]["owner"],
+            serde_json::json!("Safety Team")
+        );
+        assert_eq!(
+            requirement.properties["metadata"]["RequirementLifecycle"]["properties"]["reviewDate"],
+            serde_json::json!("2026-05-27")
+        );
+    }
+
+    #[test]
+    fn semantic_compile_rejects_undeclared_metadata_application_property() {
+        let stdlib = load_model_stack(&crate::paths::default_stdlib_path()).unwrap();
+        let report = compile_sysml_text_with_context_report(
+            r#"
+                package RequirementStatusExample {
+                    metadata def RequirementLifecycle {
+                        attribute status : String;
+                    }
+                    requirement safeStart {
+                        @RequirementLifecycle {
+                            status = "approved";
+                            owner = "Safety Team";
+                        }
+                    }
+                }
+            "#,
+            "requirements-metadata-invalid.sysml",
+            &[],
+            &stdlib,
+        );
+
+        assert_ne!(report.status, SemanticCompileStatus::Ok);
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("metadata property `owner` is not declared")
+        }));
+    }
+
+    #[test]
+    fn semantic_compile_rejects_invalid_metadata_enum_property_value() {
+        let stdlib = load_model_stack(&crate::paths::default_stdlib_path()).unwrap();
+        let report = compile_sysml_text_with_context_report(
+            r#"
+                package RequirementStatusExample {
+                    enum def RequirementStatusKind {
+                        enum draft;
+                        enum approved;
+                    }
+                    metadata def RequirementLifecycle {
+                        attribute status : RequirementStatusKind;
+                    }
+                    requirement safeStart {
+                        @RequirementLifecycle {
+                            status = RequirementStatusKind::retired;
+                        }
+                    }
+                }
+            "#,
+            "requirements-metadata-invalid-enum.sysml",
+            &[],
+            &stdlib,
+        );
+
+        assert_ne!(report.status, SemanticCompileStatus::Ok);
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("value `retired` is not a member of enumeration")
+        }));
+    }
+
+    #[test]
     fn parses_accept_after_when_and_at_forms_without_payload_type_lookup() {
         let module = parse_sysml(
             "package Demo { action a { accept sig after 10[SI::s]; accept when b.f; accept at new Time::Iso8601DateTime(\"2022-01-30T01:00:00Z\"); } }",
@@ -5455,6 +5839,48 @@ mod tests {
 
         assert_eq!(report.status, SemanticCompileStatus::Ok);
         assert!(report.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn semantic_compile_preserves_allocation_endpoints() {
+        let stdlib = fake_stdlib(["SysML::Systems::PartDefinition"]);
+        let report = compile_sysml_text_with_context_report(
+            "package Demo {
+                part def PowerControlUnit;
+                action def ProvidePower {
+                    action a1;
+                }
+                allocation a1_to_pcu allocate ProvidePower::a1 to PowerControlUnit;
+            }",
+            "inline.sysml",
+            &[],
+            &stdlib,
+        );
+
+        assert_eq!(report.status, SemanticCompileStatus::Ok);
+        assert!(report.diagnostics.is_empty());
+        let document = report.document.unwrap();
+        let allocation = document
+            .elements
+            .iter()
+            .find(|element| element.id == "allocation.Demo.a1_to_pcu")
+            .unwrap();
+        assert_eq!(
+            allocation.properties.get("allocated"),
+            Some(&serde_json::json!("feature.Demo.ProvidePower.a1"))
+        );
+        assert_eq!(
+            allocation.properties.get("allocated_to"),
+            Some(&serde_json::json!("type.Demo.PowerControlUnit"))
+        );
+        assert_eq!(
+            allocation.properties.get("source"),
+            Some(&serde_json::json!("feature.Demo.ProvidePower.a1"))
+        );
+        assert_eq!(
+            allocation.properties.get("target"),
+            Some(&serde_json::json!("type.Demo.PowerControlUnit"))
+        );
     }
 
     #[test]
