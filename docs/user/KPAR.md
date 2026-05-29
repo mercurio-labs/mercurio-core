@@ -243,6 +243,16 @@ If the package is found in a configured repository, Mercurio verifies the staged
 
 If a `kpar:` locator cannot be resolved, Mercurio reports the package coordinate and every repository root it searched.
 
+## Standard Library Package Locator
+
+When a project omits `baseline_libraries`, Mercurio uses the default standard library locator:
+
+```text
+kpar:org.omg/sysml-stdlib:2.0.0
+```
+
+That locator now follows the package convention too. Resolution first checks local, configured, and bundled package repositories. If no staged aggregate package is present, Mercurio resolves the bundled OMG package set at `examples/sysml.library.kpar`, using `Systems-Library.kpar` as the entry package. During migration, the legacy bundled KIR at `resources/stdlib.full.kir.json` remains the final fallback.
+
 ## Compiled KIR Cache
 
 KPAR is the package distribution format. Mercurio compiles KPAR sources into KIR before using them as semantic context.

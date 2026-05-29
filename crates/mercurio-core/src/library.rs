@@ -6,11 +6,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::ir::{KirDocument, KirError};
 use crate::paths::{
-    bundled_package_repo_path, default_package_kir_cache_path, default_package_repo_path,
-    default_stdlib_path, default_user_config_path,
+    bundled_package_repo_path, bundled_stdlib_package_set_path, default_package_kir_cache_path,
+    default_package_repo_path, default_stdlib_path, default_user_config_path,
 };
 
 pub const DEFAULT_STDLIB_LOCATOR: &str = "kpar:org.omg/sysml-stdlib:2.0.0";
+const DEFAULT_STDLIB_PACKAGE_SET_ENTRY: &str =
+    "https://www.omg.org/spec/SysML/20250201/Systems-Library.kpar";
 use crate::source_set::{SourceDocument, compile_source_documents};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -318,6 +320,11 @@ impl LibraryProviderConfig {
                 }
 
                 if locator.as_str() == DEFAULT_STDLIB_LOCATOR {
+                    if let Ok(artifact) =
+                        resolve_bundled_stdlib_package_set(library_id, base_dir, library_context)
+                    {
+                        return Ok(artifact);
+                    }
                     return Self::BundledStdlib.resolve_with_context(
                         library_id,
                         base_dir,
@@ -454,6 +461,11 @@ impl LibraryProviderConfig {
                 }
 
                 if locator.as_str() == DEFAULT_STDLIB_LOCATOR {
+                    if let Ok(fingerprint) =
+                        bundled_stdlib_package_set_fingerprint(library_id, base_dir)
+                    {
+                        return Ok(fingerprint);
+                    }
                     return Self::BundledStdlib.source_fingerprint(library_id, base_dir);
                 }
 
@@ -493,6 +505,29 @@ fn resolve_provider_path(path: &str, base_dir: Option<&Path>) -> PathBuf {
     } else {
         candidate
     }
+}
+
+fn resolve_bundled_stdlib_package_set(
+    library_id: &str,
+    base_dir: Option<&Path>,
+    library_context: Option<&KirDocument>,
+) -> Result<ResolvedLibraryArtifact, KirError> {
+    LibraryProviderConfig::PackageSetDirectory {
+        path: bundled_stdlib_package_set_path().display().to_string(),
+        entry: DEFAULT_STDLIB_PACKAGE_SET_ENTRY.to_string(),
+    }
+    .resolve_with_context(library_id, base_dir, library_context)
+}
+
+fn bundled_stdlib_package_set_fingerprint(
+    library_id: &str,
+    base_dir: Option<&Path>,
+) -> Result<LibrarySourceFingerprint, KirError> {
+    LibraryProviderConfig::PackageSetDirectory {
+        path: bundled_stdlib_package_set_path().display().to_string(),
+        entry: DEFAULT_STDLIB_PACKAGE_SET_ENTRY.to_string(),
+    }
+    .source_fingerprint(library_id, base_dir)
 }
 
 fn configured_package_repository_paths() -> Vec<PathBuf> {
@@ -1507,6 +1542,38 @@ mod tests {
 
         assert_eq!(config.id, "stdlib");
         assert_eq!(config.provider, LibraryProviderConfig::BundledStdlib);
+    }
+
+    #[test]
+    fn stdlib_locator_resolves_bundled_package_set_or_kir_fallback() {
+        let artifact = BaselineLibraryConfig::stdlib_locator().resolve().unwrap();
+
+        assert_eq!(artifact.library_id, "stdlib");
+        assert!(
+            matches!(
+                artifact.source_kind.as_str(),
+                "package_set_directory" | "bundled_stdlib"
+            ),
+            "unexpected stdlib source kind: {}",
+            artifact.source_kind
+        );
+        assert!(!artifact.document.elements.is_empty());
+    }
+
+    #[test]
+    fn stdlib_locator_fingerprint_uses_bundled_package_set_before_kir_fallback() {
+        let fingerprint = BaselineLibraryConfig::stdlib_locator()
+            .provider
+            .source_fingerprint("stdlib", None)
+            .unwrap();
+
+        assert_eq!(fingerprint.source_kind, "package_set_directory");
+        assert!(
+            fingerprint
+                .cache_metadata
+                .source_identity
+                .ends_with("Systems-Library.kpar")
+        );
     }
 
     #[test]
