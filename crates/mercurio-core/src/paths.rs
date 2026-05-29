@@ -5,6 +5,7 @@ const DEFAULT_STDLIB_RELATIVE_PATH: &str = "resources/stdlib.full.kir.json";
 const DEFAULT_STDLIB_RULEPACK_RELATIVE_PATH: &str = "resources/stdlib.rulepack.json";
 const DEFAULT_LANGUAGE_PROFILE_ROOT_RELATIVE_PATH: &str = "resources/language-profiles";
 const DEFAULT_BUNDLED_PACKAGE_REPO_RELATIVE_PATH: &str = "packages";
+const DEFAULT_BUNDLED_STDLIB_PACKAGE_SET_RELATIVE_PATH: &str = "examples/sysml.library.kpar";
 const REPO_SENTINELS: [&str; 3] = [
     "resources/stdlib.full.kir.json",
     "mappings/l2/pilot_constructs.seed.json",
@@ -77,6 +78,10 @@ pub fn default_package_kir_cache_path() -> PathBuf {
 
 pub fn bundled_package_repo_path() -> PathBuf {
     repo_path(DEFAULT_BUNDLED_PACKAGE_REPO_RELATIVE_PATH)
+}
+
+pub fn bundled_stdlib_package_set_path() -> PathBuf {
+    repo_path(DEFAULT_BUNDLED_STDLIB_PACKAGE_SET_RELATIVE_PATH)
 }
 
 pub fn repo_path(relative: &str) -> PathBuf {
