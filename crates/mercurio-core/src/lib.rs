@@ -143,8 +143,8 @@ pub use paths::{
 pub use plugin_registry::{
     PluginInstallSource as RegistryPluginInstallSource, PluginRegistryError,
     default_plugin_registry_root, install_plugin_manifest, installed_plugin_manifest_paths,
-    plugin_manifest_dir, plugin_registry_root, read_plugin_install_source,
-    read_plugin_manifest as read_registry_plugin_manifest,
+    plugin_manifest_dir, plugin_package_digest, plugin_registry_root, publish_plugin_package,
+    read_plugin_install_source, read_plugin_manifest as read_registry_plugin_manifest,
 };
 pub use project::{
     PROJECT_DESCRIPTOR_FILE_NAME, ProjectDescriptor, ProjectDescriptorError, ProjectLibraryConfig,

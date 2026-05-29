@@ -149,6 +149,38 @@ pub fn install_plugin_manifest(
     Ok(target_path)
 }
 
+pub fn publish_plugin_package(
+    package_path: &Path,
+    root: &Path,
+    id: &str,
+    version: &str,
+    force: bool,
+) -> Result<PathBuf, PluginRegistryError> {
+    let target_dir = root
+        .join(safe_plugin_path_segment(id))
+        .join(safe_plugin_path_segment(version));
+    let target_path = target_dir.join("plugin.mpack");
+    if !force && target_path.exists() {
+        return Err(PluginRegistryError::Invalid(format!(
+            "plugin package {id}:{version} already exists in {}; use --force to overwrite",
+            root.display()
+        )));
+    }
+    std::fs::create_dir_all(&target_dir).map_err(|err| {
+        PluginRegistryError::Io(format!(
+            "failed to create plugin repository directory {}: {err}",
+            target_dir.display()
+        ))
+    })?;
+    std::fs::copy(package_path, &target_path).map_err(|err| {
+        PluginRegistryError::Io(format!(
+            "failed to publish plugin package {}: {err}",
+            target_path.display()
+        ))
+    })?;
+    Ok(target_path)
+}
+
 pub fn installed_plugin_manifest_paths(root: &Path) -> Result<Vec<PathBuf>, PluginRegistryError> {
     let installed = root.join("installed");
     if !installed.exists() {
@@ -181,6 +213,41 @@ fn collect_installed_plugin_manifest_paths(
         }
     }
     Ok(())
+}
+
+pub fn plugin_package_digest(path: &Path) -> Result<String, PluginRegistryError> {
+    let bytes = std::fs::read(path).map_err(|err| {
+        PluginRegistryError::Io(format!(
+            "failed to read plugin package {}: {err}",
+            path.display()
+        ))
+    })?;
+    Ok(format_stable_digest([(
+        "file".as_bytes(),
+        bytes.as_slice(),
+    )]))
+}
+
+fn format_stable_digest<'a, I>(chunks: I) -> String
+where
+    I: IntoIterator<Item = (&'a [u8], &'a [u8])>,
+{
+    let mut hash = 0xcbf29ce484222325u64;
+    for (label, bytes) in chunks {
+        hash = digest_bytes(hash, &(label.len() as u64).to_le_bytes());
+        hash = digest_bytes(hash, label);
+        hash = digest_bytes(hash, &(bytes.len() as u64).to_le_bytes());
+        hash = digest_bytes(hash, bytes);
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
+fn digest_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn safe_plugin_path_segment(value: &str) -> String {
@@ -243,6 +310,37 @@ mod tests {
         assert!(path.with_file_name("plugin.mpack").is_file());
         let manifests = installed_plugin_manifest_paths(&root.join("plugins")).unwrap();
         assert_eq!(manifests, vec![path]);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn publish_plugin_package_writes_repository_layout() {
+        let root = temp_dir("mercurio-plugin-publish-core");
+        let package_path = root.join("sample.mpack");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&package_path, b"package").unwrap();
+
+        let published = publish_plugin_package(
+            &package_path,
+            &root.join("repo"),
+            "org.example/plugin",
+            "1.0.0",
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            published,
+            root.join("repo")
+                .join("org.example_plugin")
+                .join("1.0.0")
+                .join("plugin.mpack")
+        );
+        assert_eq!(
+            plugin_package_digest(&published).unwrap(),
+            "fnv1a64:ba03c15973f83f90"
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }

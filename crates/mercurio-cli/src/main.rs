@@ -157,6 +157,7 @@ struct PluginCommand {
 #[derive(Debug, Subcommand)]
 enum PluginSubcommand {
     Install(PluginInstallCommand),
+    Publish(PluginPublishCommand),
     List(PluginListCommand),
     Inspect(PluginInspectCommand),
 }
@@ -168,6 +169,17 @@ struct PluginInstallCommand {
     from: Option<String>,
     #[arg(long)]
     root: Option<PathBuf>,
+    #[arg(long)]
+    force: bool,
+    #[arg(long)]
+    quiet: bool,
+}
+
+#[derive(Debug, Args)]
+struct PluginPublishCommand {
+    package: PathBuf,
+    #[arg(long)]
+    to: String,
     #[arg(long)]
     force: bool,
     #[arg(long)]
@@ -731,6 +743,7 @@ fn run_package(command: PackageCommand) -> Result<RunResult, CliError> {
 fn run_plugin(command: PluginCommand) -> Result<RunResult, CliError> {
     match command.command {
         PluginSubcommand::Install(command) => run_plugin_install(command),
+        PluginSubcommand::Publish(command) => run_plugin_publish(command),
         PluginSubcommand::List(command) => run_plugin_list(command),
         PluginSubcommand::Inspect(command) => run_plugin_inspect(command),
     }
@@ -1220,6 +1233,70 @@ fn parse_plugin_coordinate(coordinate: &str) -> Result<(String, String), CliErro
         ));
     }
     Ok((id.to_string(), version.to_string()))
+}
+
+fn run_plugin_publish(command: PluginPublishCommand) -> Result<RunResult, CliError> {
+    let source =
+        registry::read_plugin_install_source(&command.package).map_err(registry_error_to_cli)?;
+    if source.package_path.is_none() {
+        return Err(CliError::usage(
+            "plugin publish requires a packaged .mpack archive",
+        ));
+    }
+    let manifest: PluginManifestEnvelope = serde_json::from_value(source.manifest.clone())
+        .map_err(|err| {
+            CliError::usage(format!(
+                "invalid plugin manifest {}: {err}",
+                command.package.display()
+            ))
+        })?;
+    validate_plugin_manifest(&manifest)?;
+    let target_repo = plugin_repository_target(&command.to)?;
+    let target_path = registry::publish_plugin_package(
+        &command.package,
+        &target_repo,
+        &manifest.id,
+        &manifest.version,
+        command.force,
+    )
+    .map_err(registry_error_to_cli)?;
+    let digest = registry::plugin_package_digest(&target_path).map_err(registry_error_to_cli)?;
+    let stdout = if command.quiet {
+        String::new()
+    } else {
+        format!(
+            "published plugin: {}:{}\nto: {}\ndigest: {}\n",
+            manifest.id,
+            manifest.version,
+            target_path.display(),
+            digest
+        )
+    };
+    Ok(RunResult {
+        exit_code: 0,
+        stdout,
+    })
+}
+
+fn plugin_repository_target(target: &str) -> Result<PathBuf, CliError> {
+    if target.starts_with("oci://")
+        || target.starts_with("http://")
+        || target.starts_with("https://")
+    {
+        return Err(CliError::usage(
+            "remote plugin package repositories are not implemented yet; use a local repository path or file:// path",
+        ));
+    }
+    let path = target
+        .strip_prefix("file://")
+        .or_else(|| target.strip_prefix("file:"))
+        .unwrap_or(target);
+    if path.trim().is_empty() {
+        return Err(CliError::usage(
+            "plugin repository target must not be empty",
+        ));
+    }
+    Ok(PathBuf::from(path))
 }
 
 fn run_plugin_list(command: PluginListCommand) -> Result<RunResult, CliError> {
@@ -3953,6 +4030,53 @@ mod tests {
             registry
                 .join("installed")
                 .join("org.mercurio.requirements")
+                .join("0.1.0")
+                .join("plugin.mpack")
+                .is_file()
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn plugin_publish_writes_local_repository_layout() {
+        let root = temp_dir("mercurio-cli-plugin-publish");
+        let package_path = root.join("requirements.mpack");
+        std::fs::create_dir_all(&root).unwrap();
+        write_test_plugin_package(
+            &package_path,
+            r#"{
+  "id": "org.mercurio.requirements",
+  "version": "0.1.0",
+  "name": "Requirements Reasoning",
+  "services": [
+    {
+      "id": "requirements.coverage",
+      "runtime": "in_process"
+    }
+  ]
+}"#,
+        );
+
+        let repo = root.join("repo");
+        let publish = run_args(&[
+            "plugin",
+            "publish",
+            package_path.to_str().unwrap(),
+            "--to",
+            repo.to_str().unwrap(),
+        ])
+        .unwrap();
+
+        assert_eq!(publish.exit_code, 0);
+        assert!(
+            publish
+                .stdout
+                .contains("published plugin: org.mercurio.requirements:0.1.0")
+        );
+        assert!(publish.stdout.contains("digest: fnv1a64:"));
+        assert!(
+            repo.join("org.mercurio.requirements")
                 .join("0.1.0")
                 .join("plugin.mpack")
                 .is_file()

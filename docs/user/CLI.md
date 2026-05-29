@@ -230,6 +230,7 @@ Install and inspect plugin manifests through the default `mercurio` CLI:
 mercurio plugin install .\extension.json
 mercurio plugin install .\org.mercurio.semantic-impact-0.1.0.mpack
 mercurio plugin install mpack:org.mercurio.semantic-impact:0.1.0 --from .\plugin-repo
+mercurio plugin publish .\org.mercurio.semantic-impact-0.1.0.mpack --to .\plugin-repo
 mercurio plugin list
 mercurio plugin inspect org.mercurio.requirements --version 0.1.0
 ```
@@ -244,6 +245,8 @@ plugin-repo/
     0.1.0/
       plugin.mpack
 ```
+
+`plugin publish` writes that layout and reports the package digest. Project plugin pins can use the digest to bind execution to an exact `.mpack` archive.
 
 Reasoning services are implemented in the sibling `mercurio-reasoning` repository. `mercurio-reason invoke` can resolve service declarations from this same local plugin registry, while the default `mercurio` CLI remains the package and registry management surface.
 
