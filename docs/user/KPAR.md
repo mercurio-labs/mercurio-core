@@ -241,6 +241,8 @@ Use `MERCURIO_CONFIG_PATH` to point Mercurio at a different config file.
 
 If the package is found in a configured repository, Mercurio verifies the staged package manifest digest and then loads it through the existing KPAR library path.
 
+If a `kpar:` locator cannot be resolved, Mercurio reports the package coordinate and every repository root it searched.
+
 ## Compiled KIR Cache
 
 KPAR is the package distribution format. Mercurio compiles KPAR sources into KIR before using them as semantic context.

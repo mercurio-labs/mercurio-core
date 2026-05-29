@@ -325,10 +325,7 @@ impl LibraryProviderConfig {
                     );
                 }
 
-                Err(KirError::Sysml(format!(
-                    "KPAR package '{}' version '{}' was not found in local or bundled package repositories",
-                    name, version
-                )))
+                Err(kpar_package_not_found_error(name, version))
             }
             Self::PackageSetDirectory { path, entry } => {
                 let fingerprint = self.source_fingerprint(library_id, base_dir)?;
@@ -460,10 +457,7 @@ impl LibraryProviderConfig {
                     return Self::BundledStdlib.source_fingerprint(library_id, base_dir);
                 }
 
-                Err(KirError::Sysml(format!(
-                    "KPAR package '{}' version '{}' was not found in local or bundled package repositories",
-                    name, version
-                )))
+                Err(kpar_package_not_found_error(name, version))
             }
             Self::PackageSetDirectory { path, entry } => {
                 let source_path = resolve_provider_path(path, base_dir);
@@ -535,6 +529,17 @@ fn split_package_repository_list(value: &str) -> Vec<PathBuf> {
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
         .collect()
+}
+
+fn kpar_package_not_found_error(name: &str, version: &str) -> KirError {
+    let searched = LocalPackageRepository::resolution_repositories()
+        .into_iter()
+        .map(|repo| format!("- {}", repo.root().display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    KirError::Sysml(format!(
+        "KPAR package '{name}' version '{version}' was not found in configured package repositories\nsearched:\n{searched}"
+    ))
 }
 
 pub fn load_baseline_library_document() -> Result<KirDocument, KirError> {
@@ -1996,6 +2001,85 @@ mod tests {
                 .iter()
                 .any(|element| element.id == "type.Domain.Thing")
         );
+
+        std::fs::remove_dir_all(temp_root).unwrap();
+    }
+
+    #[test]
+    fn kpar_locator_not_found_reports_searched_repositories() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp_root = std::env::temp_dir().join(format!(
+            "mercurio-kpar-locator-missing-{}",
+            std::process::id()
+        ));
+        let user_repo = temp_root.join("user");
+        let configured_repo = temp_root.join("configured");
+        let config_path = temp_root.join("config.json");
+        std::fs::create_dir_all(&temp_root).unwrap();
+        std::fs::write(
+            &config_path,
+            serde_json::json!({
+                "package_repositories": [configured_repo.display().to_string()]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        unsafe {
+            std::env::set_var("MERCURIO_PACKAGE_REPO", &user_repo);
+            std::env::set_var("MERCURIO_CONFIG_PATH", &config_path);
+            std::env::remove_var("MERCURIO_PACKAGE_REPOSITORIES");
+        }
+        let err = LibraryProviderConfig::KparLocator {
+            locator: "kpar:missing-lib:9.9.9".to_string(),
+        }
+        .resolve("missing-lib")
+        .unwrap_err();
+        unsafe {
+            std::env::remove_var("MERCURIO_PACKAGE_REPO");
+            std::env::remove_var("MERCURIO_CONFIG_PATH");
+        }
+
+        let message = err.to_string();
+        assert!(message.contains("missing-lib"));
+        assert!(message.contains("9.9.9"));
+        assert!(message.contains("searched:"));
+        assert!(message.contains(&user_repo.display().to_string()));
+        assert!(message.contains(&configured_repo.display().to_string()));
+        assert!(message.contains(&super::bundled_package_repo_path().display().to_string()));
+
+        std::fs::remove_dir_all(temp_root).unwrap();
+    }
+
+    #[test]
+    fn kpar_locator_fingerprint_not_found_reports_searched_repositories() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp_root = std::env::temp_dir().join(format!(
+            "mercurio-kpar-locator-fingerprint-missing-{}",
+            std::process::id()
+        ));
+        let user_repo = temp_root.join("user");
+        std::fs::create_dir_all(&temp_root).unwrap();
+
+        unsafe {
+            std::env::set_var("MERCURIO_PACKAGE_REPO", &user_repo);
+            std::env::remove_var("MERCURIO_CONFIG_PATH");
+            std::env::remove_var("MERCURIO_PACKAGE_REPOSITORIES");
+        }
+        let err = LibraryProviderConfig::KparLocator {
+            locator: "kpar:missing-lib:9.9.9".to_string(),
+        }
+        .source_fingerprint("missing-lib", None)
+        .unwrap_err();
+        unsafe {
+            std::env::remove_var("MERCURIO_PACKAGE_REPO");
+        }
+
+        let message = err.to_string();
+        assert!(message.contains("missing-lib"));
+        assert!(message.contains("searched:"));
+        assert!(message.contains(&user_repo.display().to_string()));
+        assert!(message.contains(&super::bundled_package_repo_path().display().to_string()));
 
         std::fs::remove_dir_all(temp_root).unwrap();
     }
