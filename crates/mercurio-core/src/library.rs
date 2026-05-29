@@ -941,9 +941,9 @@ pub fn write_kpar_package(path: &Path, package: &KparPackageBuild) -> Result<(),
             "package name must not be empty".to_string(),
         ));
     }
-    if package.sources.is_empty() {
+    if package.sources.is_empty() && package.precompiled_kir.is_none() {
         return Err(KirError::Sysml(
-            "package must contain at least one source file".to_string(),
+            "package must contain at least one source file or precompiled KIR document".to_string(),
         ));
     }
     if let Some(parent) = path.parent() {
@@ -1584,35 +1584,83 @@ mod tests {
     }
 
     #[test]
-    fn stdlib_locator_resolves_bundled_package_set_or_kir_fallback() {
+    fn stdlib_locator_resolves_bundled_package_before_fallbacks() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp_root = std::env::temp_dir().join(format!(
+            "mercurio-stdlib-locator-empty-repo-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&temp_root).unwrap();
+        unsafe {
+            std::env::set_var("MERCURIO_PACKAGE_REPO", &temp_root);
+            std::env::remove_var("MERCURIO_PACKAGE_REPOSITORIES");
+            std::env::set_var("MERCURIO_CONFIG_PATH", temp_root.join("config.json"));
+        }
+
         let artifact = BaselineLibraryConfig::stdlib_locator().resolve().unwrap();
 
         assert_eq!(artifact.library_id, "stdlib");
+        assert_eq!(artifact.source_kind, "kpar_locator");
+        assert_eq!(
+            artifact
+                .cache_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.source_version.as_deref()),
+            Some("2.0.0")
+        );
         assert!(
-            matches!(
-                artifact.source_kind.as_str(),
-                "package_set_directory" | "bundled_stdlib"
-            ),
-            "unexpected stdlib source kind: {}",
-            artifact.source_kind
+            artifact
+                .source_path
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str())
+                == Some("sysml-stdlib-2.0.0.kpar")
         );
         assert!(!artifact.document.elements.is_empty());
+
+        unsafe {
+            std::env::remove_var("MERCURIO_PACKAGE_REPO");
+            std::env::remove_var("MERCURIO_CONFIG_PATH");
+        }
+        std::fs::remove_dir_all(temp_root).unwrap();
     }
 
     #[test]
-    fn stdlib_locator_fingerprint_uses_bundled_package_set_before_kir_fallback() {
+    fn stdlib_locator_fingerprint_uses_bundled_package_before_fallbacks() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp_root = std::env::temp_dir().join(format!(
+            "mercurio-stdlib-fingerprint-empty-repo-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&temp_root).unwrap();
+        unsafe {
+            std::env::set_var("MERCURIO_PACKAGE_REPO", &temp_root);
+            std::env::remove_var("MERCURIO_PACKAGE_REPOSITORIES");
+            std::env::set_var("MERCURIO_CONFIG_PATH", temp_root.join("config.json"));
+        }
+
         let fingerprint = BaselineLibraryConfig::stdlib_locator()
             .provider
             .source_fingerprint("stdlib", None)
             .unwrap();
 
-        assert_eq!(fingerprint.source_kind, "package_set_directory");
+        assert_eq!(fingerprint.source_kind, "kpar_locator");
+        assert_eq!(
+            fingerprint.cache_metadata.source_version.as_deref(),
+            Some("2.0.0")
+        );
         assert!(
             fingerprint
                 .cache_metadata
                 .source_identity
-                .ends_with("Systems-Library.kpar")
+                .ends_with("org.omg/sysml-stdlib:2.0.0")
         );
+
+        unsafe {
+            std::env::remove_var("MERCURIO_PACKAGE_REPO");
+            std::env::remove_var("MERCURIO_CONFIG_PATH");
+        }
+        std::fs::remove_dir_all(temp_root).unwrap();
     }
 
     #[test]
@@ -1914,6 +1962,44 @@ mod tests {
 
         assert_eq!(artifact.document.elements.len(), 1);
         assert_eq!(artifact.document.elements[0].id, "type.Precompiled.Thing");
+
+        std::fs::remove_dir_all(temp_root).unwrap();
+    }
+
+    #[test]
+    fn write_kpar_package_allows_kir_only_library() {
+        let temp_root =
+            std::env::temp_dir().join(format!("mercurio-kpar-kir-only-{}", std::process::id()));
+        std::fs::create_dir_all(&temp_root).unwrap();
+        let kpar_path = temp_root.join("stdlib.kpar");
+        let document = KirDocument {
+            metadata: BTreeMap::new(),
+            elements: vec![KirElement {
+                id: "type.Stdlib.Thing".to_string(),
+                kind: "PartDefinition".to_string(),
+                layer: 2,
+                properties: BTreeMap::new(),
+            }],
+        };
+
+        write_kpar_package(
+            &kpar_path,
+            &KparPackageBuild {
+                name: "Stdlib".to_string(),
+                version: Some("2.0.0".to_string()),
+                precompiled_kir: Some(document),
+                sources: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let artifact = LibraryProviderConfig::KparFile {
+            path: kpar_path.display().to_string(),
+        }
+        .resolve("stdlib")
+        .unwrap();
+
+        assert_eq!(artifact.document.elements[0].id, "type.Stdlib.Thing");
 
         std::fs::remove_dir_all(temp_root).unwrap();
     }

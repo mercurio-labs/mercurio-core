@@ -39,6 +39,12 @@ mercurio package build --file src --out domain-lib-0.1.0.kpar --name domain-lib 
 
 When `document.kir.json` is present in a KPAR, Mercurio loads that precompiled KIR instead of recompiling the package sources. The source files still remain in the archive for inspection and future rebuilds.
 
+Package an existing KIR document directly:
+
+```powershell
+mercurio package build --kir resources/stdlib.full.kir.json --name org.omg/sysml-stdlib --version 2.0.0
+```
+
 ## Local Package Repository
 
 Mercurio supports a Maven-like local package repository for staged KPAR packages. In this workflow, `package build` can write to a local package repository first, and a later `package publish` command can push that staged package to a remote registry.
@@ -259,7 +265,7 @@ When a project omits `baseline_libraries`, Mercurio uses the default standard li
 kpar:org.omg/sysml-stdlib:2.0.0
 ```
 
-That locator now follows the package convention too. Resolution first checks local, configured, and bundled package repositories. If no staged aggregate package is present, Mercurio resolves the bundled OMG package set at `examples/sysml.library.kpar`, using `Systems-Library.kpar` as the entry package. During migration, the legacy bundled KIR at `resources/stdlib.full.kir.json` remains the final fallback.
+That locator now follows the package convention too. Resolution first checks local, configured, and bundled package repositories. Mercurio ships a bundled package for `org.omg/sysml-stdlib:2.0.0` that contains `document.kir.json`. If no staged package is present, Mercurio resolves the bundled OMG package set at `examples/sysml.library.kpar`, using `Systems-Library.kpar` as the entry package. During migration, the legacy bundled KIR at `resources/stdlib.full.kir.json` remains the final fallback.
 
 ## Compiled KIR Cache
 

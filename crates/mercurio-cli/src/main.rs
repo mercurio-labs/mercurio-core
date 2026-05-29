@@ -235,6 +235,8 @@ struct PackageBuildCommand {
     #[arg(long = "file")]
     files: Vec<PathBuf>,
     #[arg(long)]
+    kir: Option<PathBuf>,
+    #[arg(long)]
     out: Option<PathBuf>,
     #[arg(long)]
     stdlib: Option<PathBuf>,
@@ -811,7 +813,22 @@ fn run_project_new(command: ProjectNewCommand) -> Result<RunResult, CliError> {
 }
 
 fn run_package_build(command: PackageBuildCommand) -> Result<RunResult, CliError> {
-    let sources = read_package_sources(&command.files)?;
+    let sources = if command.files.is_empty() {
+        Vec::new()
+    } else {
+        read_package_sources(&command.files)?
+    };
+    if sources.is_empty() && command.kir.is_none() {
+        return Err(CliError::usage(
+            "provide at least one --file or a --kir document",
+        ));
+    }
+    let precompiled_kir = command
+        .kir
+        .as_deref()
+        .map(KirDocument::from_path)
+        .transpose()
+        .map_err(|err| CliError::execution(format!("failed to read KIR document: {err}")))?;
     let package_name = match (&command.name, &command.out) {
         (Some(name), _) => name.clone(),
         (None, Some(out)) => derive_package_name(out),
@@ -830,7 +847,7 @@ fn run_package_build(command: PackageBuildCommand) -> Result<RunResult, CliError
         name: package_name,
         version: command.version.clone(),
         sources,
-        precompiled_kir: None,
+        precompiled_kir,
     };
     let library_context =
         load_library_context(command.stdlib.as_deref(), package_context_path(&command)?)?;
@@ -861,7 +878,7 @@ fn run_package_build(command: PackageBuildCommand) -> Result<RunResult, CliError
             });
         }
     };
-    if command.include_kir {
+    if command.include_kir && package.precompiled_kir.is_none() {
         let package = KparPackageBuild {
             precompiled_kir: Some(artifact.document.clone()),
             ..package.clone()
@@ -2062,6 +2079,9 @@ fn lint_context_path(command: &LintCommand) -> Result<PathBuf, CliError> {
 }
 
 fn package_context_path(command: &PackageBuildCommand) -> Result<PathBuf, CliError> {
+    if let Some(path) = &command.kir {
+        return Ok(path.clone());
+    }
     command
         .files
         .first()
@@ -3284,6 +3304,49 @@ mod tests {
                 .iter()
                 .any(|element| element.id == "type.Demo.Vehicle")
         );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn package_build_kir_writes_kir_only_package() {
+        let root = temp_dir("mercurio-cli-package-kir-only");
+        std::fs::create_dir_all(&root).unwrap();
+        let kir_path = root.join("document.kir.json");
+        let out_path = root.join("stdlib.kpar");
+        let document = KirDocument {
+            metadata: Default::default(),
+            elements: vec![mercurio_core::KirElement {
+                id: "type.Stdlib.Thing".to_string(),
+                kind: "PartDefinition".to_string(),
+                layer: 2,
+                properties: Default::default(),
+            }],
+        };
+        document.write_pretty_to_path(&kir_path).unwrap();
+
+        let build = run_args(&[
+            "package",
+            "build",
+            "--kir",
+            kir_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+            "--name",
+            "org.omg/sysml-stdlib",
+            "--version",
+            "2.0.0",
+            "--quiet",
+        ])
+        .unwrap();
+
+        assert_eq!(build.exit_code, 0);
+        let artifact = LibraryProviderConfig::KparFile {
+            path: out_path.display().to_string(),
+        }
+        .resolve("stdlib")
+        .unwrap();
+        assert_eq!(artifact.document.elements[0].id, "type.Stdlib.Thing");
 
         std::fs::remove_dir_all(root).unwrap();
     }

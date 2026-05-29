@@ -1,0 +1,9 @@
+{
+  "schema": "dev.mercurio.local-package.v1",
+  "name": "org.omg/sysml-stdlib",
+  "version": "2.0.0",
+  "kind": "kpar",
+  "file": "sysml-stdlib-2.0.0.kpar",
+  "digest": "fnv1a64:2d86803a065b3166",
+  "created_at": "unix:1780061452"
+}
