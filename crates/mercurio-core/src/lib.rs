@@ -158,8 +158,9 @@ pub use paths::{
     default_user_config_path, default_workspace_root, repo_path, repo_root,
 };
 pub use performance::{
-    CoreScalabilityMetricConfig, CoreScalabilityReport, CoreScalabilityScenarioReport,
-    CoreScalabilityTimings, SemanticDiffSummary, TimingMetric, run_core_scalability_metric,
+    CoreScalabilityCreationStrategy, CoreScalabilityMetricConfig, CoreScalabilityReport,
+    CoreScalabilityScenarioReport, CoreScalabilityTimings, SemanticDiffSummary, TimingMetric,
+    run_core_scalability_metric,
 };
 pub use plugin_registry::{
     InstalledMpack, MpackActivationIndex, MpackAssetRef,

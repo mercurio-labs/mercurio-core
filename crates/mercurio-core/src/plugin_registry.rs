@@ -303,7 +303,10 @@ fn read_installed_mpack_manifest(path: PathBuf) -> Result<InstalledMpack, Plugin
             .map(|error| error.to_string())
             .collect::<Vec<_>>()
             .join("; ");
-        PluginRegistryError::Invalid(format!("invalid MPack manifest {}: {errors}", path.display()))
+        PluginRegistryError::Invalid(format!(
+            "invalid MPack manifest {}: {errors}",
+            path.display()
+        ))
     })?;
     let package_path = path.with_file_name("plugin.mpack");
     Ok(InstalledMpack {

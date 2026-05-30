@@ -15,7 +15,6 @@ use crate::frontend::resolver::{
 };
 use crate::ir::{KirDocument, KirElement};
 #[cfg(not(target_arch = "wasm32"))]
-
 #[derive(Debug, Deserialize)]
 pub struct PilotConstructSeed {
     #[serde(default)]

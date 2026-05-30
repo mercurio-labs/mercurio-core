@@ -931,9 +931,7 @@ fn copy_if_different(source: &Path, target: &Path) -> Result<(), Box<dyn std::er
     }
     let source_bytes = std::fs::read(source)
         .map_err(|err| format!("failed to read source `{}`: {err}", source.display()))?;
-    if target.exists()
-        && std::fs::read(target).ok().as_deref() == Some(source_bytes.as_slice())
-    {
+    if target.exists() && std::fs::read(target).ok().as_deref() == Some(source_bytes.as_slice()) {
         return Ok(());
     }
     if let Some(parent) = target.parent() {

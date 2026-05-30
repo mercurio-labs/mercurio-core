@@ -20,6 +20,14 @@ use crate::mutation::{
     diff_kir_documents,
 };
 use crate::paths::default_stdlib_path;
+use crate::session::{CommitMode, ModelFork, ModelWorkspace, WorkspaceSnapshot};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreScalabilityCreationStrategy {
+    SessionOverlay,
+    Mutators,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreScalabilityMetricConfig {
@@ -27,6 +35,7 @@ pub struct CoreScalabilityMetricConfig {
     pub edit_count: usize,
     pub target_file: String,
     pub package_name: String,
+    pub creation_strategy: CoreScalabilityCreationStrategy,
 }
 
 impl Default for CoreScalabilityMetricConfig {
@@ -36,6 +45,7 @@ impl Default for CoreScalabilityMetricConfig {
             edit_count: 100,
             target_file: "scalability.sysml".to_string(),
             package_name: "Scalability".to_string(),
+            creation_strategy: CoreScalabilityCreationStrategy::SessionOverlay,
         }
     }
 }
@@ -45,6 +55,7 @@ pub struct CoreScalabilityReport {
     pub generated_at_unix_seconds: u64,
     pub target_file: String,
     pub package_name: String,
+    pub creation_strategy: CoreScalabilityCreationStrategy,
     pub edit_count_requested: usize,
     pub scenarios: Vec<CoreScalabilityScenarioReport>,
 }
@@ -53,6 +64,7 @@ pub struct CoreScalabilityReport {
 pub struct CoreScalabilityScenarioReport {
     pub model_size: usize,
     pub edit_count: usize,
+    pub source_file: String,
     pub sysml_bytes: usize,
     pub edited_sysml_bytes: usize,
     pub kir_elements_before: usize,
@@ -63,11 +75,11 @@ pub struct CoreScalabilityScenarioReport {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CoreScalabilityTimings {
-    pub create_with_mutators: TimingMetric,
+    pub create_model: TimingMetric,
     pub save_sysml: TimingMetric,
     pub reload_sysml: TimingMetric,
     pub compile_before_kir: TimingMetric,
-    pub feasibility_check: TimingMetric,
+    pub prepare_edits: TimingMetric,
     pub apply_edits: TimingMetric,
     pub reload_edited_sysml: TimingMetric,
     pub compile_after_kir: TimingMetric,
@@ -108,6 +120,7 @@ pub fn run_core_scalability_metric(
         generated_at_unix_seconds,
         target_file: config.target_file,
         package_name: config.package_name,
+        creation_strategy: config.creation_strategy,
         edit_count_requested: config.edit_count,
         scenarios,
     })
@@ -119,8 +132,83 @@ fn run_scenario(
     stdlib: &KirDocument,
 ) -> Result<CoreScalabilityScenarioReport, Box<dyn Error>> {
     let total_timer = Instant::now();
+    match config.creation_strategy {
+        CoreScalabilityCreationStrategy::SessionOverlay => {
+            run_session_overlay_scenario(config, model_size, stdlib, total_timer)
+        }
+        CoreScalabilityCreationStrategy::Mutators => {
+            run_mutator_scenario(config, model_size, stdlib, total_timer)
+        }
+    }
+}
 
-    let ((mut project, changed_files), create_with_mutators) = measure(|| {
+fn run_session_overlay_scenario(
+    config: &CoreScalabilityMetricConfig,
+    model_size: usize,
+    stdlib: &KirDocument,
+    total_timer: Instant,
+) -> Result<CoreScalabilityScenarioReport, Box<dyn Error>> {
+    let ((workspace, fork), create_model) =
+        measure(|| create_model_with_session_overlay(model_size, config.package_name.as_str()))?;
+
+    let (commit, save_sysml) = measure(|| fork.commit(CommitMode::RewriteSource))?;
+    let (source_file, sysml_text) = commit
+        .edited_files
+        .iter()
+        .next()
+        .map(|(path, source)| (path.clone(), source.clone()))
+        .ok_or("session commit did not emit source")?;
+    let sysml_bytes = sysml_text.len();
+
+    let (_, reload_sysml) = measure(|| {
+        load_authoring_project_from_sysml(BTreeMap::from([(
+            source_file.clone(),
+            sysml_text.clone(),
+        )]))
+    })?;
+
+    let (before_kir, compile_before_kir) =
+        measure(|| compile_sysml_text(&sysml_text, source_file.as_str(), stdlib))?;
+
+    let edit_count = config.edit_count.min(model_size);
+    let ((after_kir, edited_diff), (prepare_edits, apply_edits)) =
+        run_session_overlay_edits(&workspace, config.package_name.as_str(), edit_count)?;
+    let reload_edited_sysml = TimingMetric::zero();
+    let compile_after_kir = TimingMetric::zero();
+    let (_, diff_kir) = measure(|| Ok::<SemanticDiff, Box<dyn Error>>(edited_diff.clone()))?;
+    let total = TimingMetric::from_elapsed(total_timer.elapsed());
+
+    Ok(CoreScalabilityScenarioReport {
+        model_size,
+        edit_count,
+        source_file,
+        sysml_bytes,
+        edited_sysml_bytes: 0,
+        kir_elements_before: before_kir.elements.len(),
+        kir_elements_after: after_kir.elements.len(),
+        diff_summary: SemanticDiffSummary::from_diff(&edited_diff),
+        timings: CoreScalabilityTimings {
+            create_model,
+            save_sysml,
+            reload_sysml,
+            compile_before_kir,
+            prepare_edits,
+            apply_edits,
+            reload_edited_sysml,
+            compile_after_kir,
+            diff_kir,
+            total,
+        },
+    })
+}
+
+fn run_mutator_scenario(
+    config: &CoreScalabilityMetricConfig,
+    model_size: usize,
+    stdlib: &KirDocument,
+    total_timer: Instant,
+) -> Result<CoreScalabilityScenarioReport, Box<dyn Error>> {
+    let ((mut project, changed_files), create_model) = measure(|| {
         create_model_with_mutators(
             model_size,
             config.target_file.as_str(),
@@ -147,7 +235,7 @@ fn run_scenario(
     let proposal = rename_proposal(&context, config.package_name.as_str(), edit_count);
     let service = CoreMutationFeasibilityService::new();
 
-    let (feasibility, feasibility_check) = measure(|| {
+    let (feasibility, prepare_edits) = measure(|| {
         Ok::<MutationFeasibilityReport, Box<dyn Error>>(service.check(&context, &proposal))
     })?;
     if !matches!(
@@ -191,17 +279,18 @@ fn run_scenario(
     Ok(CoreScalabilityScenarioReport {
         model_size,
         edit_count,
+        source_file: config.target_file.clone(),
         sysml_bytes,
         edited_sysml_bytes,
         kir_elements_before: before_kir.elements.len(),
         kir_elements_after: after_kir.elements.len(),
         diff_summary: SemanticDiffSummary::from_diff(&diff),
         timings: CoreScalabilityTimings {
-            create_with_mutators,
+            create_model,
             save_sysml,
             reload_sysml,
             compile_before_kir,
-            feasibility_check,
+            prepare_edits,
             apply_edits,
             reload_edited_sysml,
             compile_after_kir,
@@ -209,6 +298,51 @@ fn run_scenario(
             total,
         },
     })
+}
+
+fn create_model_with_session_overlay(
+    model_size: usize,
+    package_name: &str,
+) -> Result<(ModelWorkspace, ModelFork), Box<dyn Error>> {
+    let workspace = ModelWorkspace::new(WorkspaceSnapshot::new(KirDocument {
+        metadata: BTreeMap::new(),
+        elements: Vec::new(),
+    })?);
+    let session = workspace.session();
+    let mut fork = session.fork("core scalability session overlay creation");
+    let package = fork.package(package_name, None)?;
+    for index in 0..model_size {
+        fork.requirement(
+            &package,
+            element_name(index),
+            format!("Generated scalability record {index:05}"),
+        )?;
+    }
+    Ok((workspace, fork))
+}
+
+fn run_session_overlay_edits(
+    workspace: &ModelWorkspace,
+    package_name: &str,
+    edit_count: usize,
+) -> Result<((KirDocument, SemanticDiff), (TimingMetric, TimingMetric)), Box<dyn Error>> {
+    let session = workspace.session();
+    let mut fork = session.fork("core scalability session overlay edits");
+    let (_, prepare_edits) = measure(|| {
+        for index in 0..edit_count {
+            fork.rename_declaration(
+                format!("{package_name}.{}", element_name(index)),
+                edited_element_name(index),
+            )?;
+        }
+        Ok::<(), Box<dyn Error>>(())
+    })?;
+    let ((after_kir, diff), apply_edits) = measure(|| {
+        let after_kir = fork.materialize()?;
+        let diff = diff_kir_documents(&workspace.current_snapshot().kir, &after_kir);
+        Ok::<_, Box<dyn Error>>((after_kir, diff))
+    })?;
+    Ok(((after_kir, diff), (prepare_edits, apply_edits)))
 }
 
 fn create_model_with_mutators(
@@ -304,6 +438,10 @@ where
 }
 
 impl TimingMetric {
+    fn zero() -> Self {
+        Self { millis: 0.0 }
+    }
+
     fn from_elapsed(elapsed: std::time::Duration) -> Self {
         Self {
             millis: elapsed.as_secs_f64() * 1_000.0,
@@ -329,21 +467,46 @@ impl SemanticDiffSummary {
 
 #[cfg(test)]
 mod tests {
-    use super::{CoreScalabilityMetricConfig, run_core_scalability_metric};
+    use super::{
+        CoreScalabilityCreationStrategy, CoreScalabilityMetricConfig, run_core_scalability_metric,
+    };
 
     #[test]
-    fn scalability_metric_runs_tiny_model() {
+    fn scalability_metric_runs_tiny_session_overlay_model() {
         let report = run_core_scalability_metric(CoreScalabilityMetricConfig {
             model_sizes: vec![3],
             edit_count: 2,
             target_file: "tiny.sysml".to_string(),
             package_name: "Tiny".to_string(),
+            creation_strategy: CoreScalabilityCreationStrategy::SessionOverlay,
         })
         .expect("metric runs");
 
+        assert_eq!(
+            report.creation_strategy,
+            CoreScalabilityCreationStrategy::SessionOverlay
+        );
         assert_eq!(report.scenarios.len(), 1);
         assert_eq!(report.scenarios[0].model_size, 3);
         assert_eq!(report.scenarios[0].edit_count, 2);
+        assert_eq!(report.scenarios[0].diff_summary.changed_attributes, 2);
+    }
+
+    #[test]
+    fn scalability_metric_still_supports_mutator_comparison() {
+        let report = run_core_scalability_metric(CoreScalabilityMetricConfig {
+            model_sizes: vec![3],
+            edit_count: 2,
+            target_file: "tiny.sysml".to_string(),
+            package_name: "Tiny".to_string(),
+            creation_strategy: CoreScalabilityCreationStrategy::Mutators,
+        })
+        .expect("metric runs");
+
+        assert_eq!(
+            report.creation_strategy,
+            CoreScalabilityCreationStrategy::Mutators
+        );
         assert_eq!(report.scenarios[0].diff_summary.removed_elements, 2);
         assert_eq!(report.scenarios[0].diff_summary.added_elements, 2);
     }

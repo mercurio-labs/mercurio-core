@@ -1,6 +1,8 @@
 use std::error::Error;
 
-use mercurio_core::{CoreScalabilityMetricConfig, run_core_scalability_metric};
+use mercurio_core::{
+    CoreScalabilityCreationStrategy, CoreScalabilityMetricConfig, run_core_scalability_metric,
+};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let config = parse_args()?;
@@ -40,6 +42,19 @@ fn parse_args() -> Result<CoreScalabilityMetricConfig, Box<dyn Error>> {
                 index += 1;
                 config.package_name = args.get(index).ok_or("--package requires a value")?.clone();
             }
+            "--strategy" => {
+                index += 1;
+                let raw = args.get(index).ok_or("--strategy requires a value")?;
+                config.creation_strategy = match raw.as_str() {
+                    "session" | "session-overlay" | "session_overlay" => {
+                        CoreScalabilityCreationStrategy::SessionOverlay
+                    }
+                    "mutators" | "mutator" => CoreScalabilityCreationStrategy::Mutators,
+                    _ => {
+                        return Err("--strategy must be `session-overlay` or `mutators`".into());
+                    }
+                };
+            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -58,6 +73,6 @@ fn parse_args() -> Result<CoreScalabilityMetricConfig, Box<dyn Error>> {
 
 fn print_help() {
     println!(
-        "Usage: cargo run -p mercurio-core --bin core_scalability_metric -- [--sizes 100,1000,10000] [--edits 100] [--file scalability.sysml] [--package Scalability]"
+        "Usage: cargo run -p mercurio-core --bin core_scalability_metric -- [--sizes 100,1000,10000] [--edits 100] [--strategy session-overlay|mutators] [--file scalability.sysml] [--package Scalability]"
     );
 }

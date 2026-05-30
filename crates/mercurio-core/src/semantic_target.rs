@@ -45,7 +45,9 @@ impl fmt::Display for SemanticTargetError {
             Self::MissingConcept(concept) => {
                 write!(f, "language profile does not define concept {concept:?}")
             }
-            Self::MissingAnchor(anchor) => write!(f, "semantic anchor not found in graph: {anchor}"),
+            Self::MissingAnchor(anchor) => {
+                write!(f, "semantic anchor not found in graph: {anchor}")
+            }
         }
     }
 }

@@ -117,9 +117,7 @@ impl fmt::Display for MpackValidationError {
 
 impl std::error::Error for MpackValidationError {}
 
-pub fn validate_mpack_manifest(
-    manifest: &MpackManifest,
-) -> Result<(), Vec<MpackValidationError>> {
+pub fn validate_mpack_manifest(manifest: &MpackManifest) -> Result<(), Vec<MpackValidationError>> {
     let mut errors = Vec::new();
     require_non_empty(&mut errors, "id", &manifest.id);
     require_non_empty(&mut errors, "version", &manifest.version);
@@ -183,11 +181,7 @@ pub fn validate_mpack_manifest(
     }
 
     for (index, service) in manifest.services.iter().enumerate() {
-        require_non_empty(
-            &mut errors,
-            &format!("services[{index}].id"),
-            &service.id,
-        );
+        require_non_empty(&mut errors, &format!("services[{index}].id"), &service.id);
     }
 
     if errors.is_empty() {

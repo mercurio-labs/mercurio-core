@@ -536,9 +536,10 @@ mod tests {
     use crate::ir::{KirDocument, KirElement, load_model_stack};
 
     fn sample_runtime() -> Runtime {
-        let document =
-            load_model_stack(&crate::paths::repo_path("test_files/examples/vehicle_model.json"))
-                .unwrap();
+        let document = load_model_stack(&crate::paths::repo_path(
+            "test_files/examples/vehicle_model.json",
+        ))
+        .unwrap();
         Runtime::from_document(document).unwrap()
     }
 
