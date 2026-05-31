@@ -111,7 +111,7 @@ pub use identity::{
 };
 pub use ir::{
     KIR_SCHEMA_VERSION, KirDocument, KirElement, KirError, KirFieldKind, KirFieldRegistry,
-    KirFieldSpec, load_model_stack,
+    KirFieldSpec, load_model_stack, load_model_stack_with_language,
 };
 pub use language::{
     BaselineLibrary, CURRENT_DEFAULT_PROFILE_ID, KermlLanguageModule, LanguageModule,
@@ -179,6 +179,7 @@ pub use project::{
     PROJECT_DESCRIPTOR_FILE_NAME, ProjectDescriptor, ProjectDescriptorError, ProjectLibraryConfig,
     ProjectLibraryRole, ProjectPluginConfig, ResolvedProjectContext, ResolvedProjectLibrary,
     discover_project_descriptor_path, resolve_project_context,
+    resolve_project_context_for_language,
 };
 pub use project_cache::{
     PersistentCacheStatus, PersistentCompileResult, PersistentProjectCache,

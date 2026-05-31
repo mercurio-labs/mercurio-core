@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::ir::{KirDocument, KirError};
+use crate::language::{SourceLanguage, language_module};
 use crate::library::{
     BaselineLibraryConfig, LibraryCacheMetadata, LibraryProviderConfig, LibrarySourceFingerprint,
     ResolvedLibraryArtifact,
@@ -151,6 +152,13 @@ impl ProjectDescriptor {
 pub fn resolve_project_context(
     open_path: &Path,
 ) -> Result<ResolvedProjectContext, ProjectDescriptorError> {
+    resolve_project_context_for_language(open_path, Some(SourceLanguage::Sysml))
+}
+
+pub fn resolve_project_context_for_language(
+    open_path: &Path,
+    default_language: Option<SourceLanguage>,
+) -> Result<ResolvedProjectContext, ProjectDescriptorError> {
     let descriptor_path = discover_project_descriptor_path(open_path);
     let descriptor_root = descriptor_path
         .as_deref()
@@ -170,6 +178,7 @@ pub fn resolve_project_context(
         descriptor.as_ref(),
         descriptor_root.as_deref(),
         cache_root.as_deref(),
+        default_language,
     )?;
 
     Ok(ResolvedProjectContext {
@@ -202,6 +211,7 @@ fn resolve_library_context_document(
     descriptor: Option<&ProjectDescriptor>,
     descriptor_root: Option<&Path>,
     cache_root: Option<&Path>,
+    default_language: Option<SourceLanguage>,
 ) -> Result<(KirDocument, Vec<ResolvedProjectLibrary>), ProjectDescriptorError> {
     let project_libraries = descriptor
         .map(|descriptor| descriptor.libraries.as_slice())
@@ -219,7 +229,26 @@ fn resolve_library_context_document(
         .map(ProjectLibraryConfig::to_baseline_library_config)
         .collect::<Result<Vec<_>, _>>()?;
     let baseline_configs = if baseline_configs.is_empty() {
-        vec![BaselineLibraryConfig::stdlib_locator()]
+        match default_language {
+            Some(SourceLanguage::Kerml) => {
+                let document = language_module(SourceLanguage::Kerml)
+                    .default_baseline()
+                    .load()?;
+                let resolved_library = ResolvedProjectLibrary {
+                    id: "kernel".to_string(),
+                    role: ProjectLibraryRole::Baseline,
+                    source_kind: "language_default".to_string(),
+                    source_path: Some(crate::paths::default_kernel_library_path()),
+                    cache_metadata: None,
+                    cache_path: None,
+                    cached_element_count: Some(document.elements.len()),
+                    document,
+                };
+                resolved_libraries.push(resolved_library);
+                Vec::new()
+            }
+            _ => vec![BaselineLibraryConfig::sysml_library_locator()],
+        }
     } else {
         baseline_configs
     };
@@ -523,8 +552,10 @@ mod tests {
     use super::{
         PROJECT_DESCRIPTOR_FILE_NAME, ProjectDescriptor, ProjectLibraryRole,
         discover_project_descriptor_path, resolve_project_context,
+        resolve_project_context_for_language,
     };
     use crate::ir::{KirDocument, KirElement};
+    use crate::language::SourceLanguage;
 
     #[test]
     fn discovers_descriptor_from_ancestor_directory() {
@@ -536,6 +567,35 @@ mod tests {
         let found = discover_project_descriptor_path(&nested).unwrap();
 
         assert_eq!(found, root.join(PROJECT_DESCRIPTOR_FILE_NAME));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolves_descriptorless_kerml_context_from_kernel_baseline() {
+        let root = temp_dir("project_context_kerml_default");
+        let nested_file = root.join("models").join("demo.kerml");
+        std::fs::create_dir_all(nested_file.parent().unwrap()).unwrap();
+        std::fs::write(&nested_file, "package Demo {}\n").unwrap();
+
+        let resolved =
+            resolve_project_context_for_language(&nested_file, Some(SourceLanguage::Kerml))
+                .unwrap();
+
+        assert!(resolved.descriptor_path.is_none());
+        assert_eq!(resolved.resolved_libraries.len(), 1);
+        assert_eq!(resolved.resolved_libraries[0].id, "kernel");
+        assert_eq!(resolved.library_context_document.elements.len(), 0);
+        assert_eq!(
+            resolved
+                .library_context_document
+                .metadata
+                .get("merged_sources")
+                .and_then(Value::as_array)
+                .and_then(|sources| sources.first())
+                .and_then(|source| source.get("library_id"))
+                .and_then(Value::as_str),
+            Some("org.omg/kerml-kernel")
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -9,6 +9,7 @@ const DEFAULT_LANGUAGE_PROFILE_ROOT_RELATIVE_PATH: &str = "resources/language-pr
 const DEFAULT_BUNDLED_PACKAGE_REPO_RELATIVE_PATH: &str = "packages";
 const DEFAULT_BUNDLED_STDLIB_PACKAGE_SET_RELATIVE_PATH: &str =
     "resources/stdlib-sources/sysml-2.0-pilot-0.57.0/sysml.library.kpar";
+const DEFAULT_KERNEL_LIBRARY_RELATIVE_PATH: &str = "resources/kernel/kerml-kernel.kir.json";
 const REPO_SENTINELS: [&str; 3] = [
     "resources/stdlib-sources/sysml-2.0-pilot-0.57.0/stdlib.full.kir.json",
     "packages/org.omg/sysml-stdlib/2.0.0/manifest.json",
@@ -39,10 +40,12 @@ pub fn default_sysml_rulepack_path() -> PathBuf {
     repo_path(DEFAULT_STDLIB_RULEPACK_RELATIVE_PATH)
 }
 
-pub fn default_kernel_library_path() -> Option<PathBuf> {
-    std::env::var("MERCURIO_KERNEL_LIBRARY_PATH")
-        .ok()
-        .map(PathBuf::from)
+pub fn default_kernel_library_path() -> PathBuf {
+    if let Ok(path) = std::env::var("MERCURIO_KERNEL_LIBRARY_PATH") {
+        return PathBuf::from(path);
+    }
+
+    repo_path(DEFAULT_KERNEL_LIBRARY_RELATIVE_PATH)
 }
 
 pub fn default_language_profile_path(profile_id: &str) -> PathBuf {
@@ -173,6 +176,17 @@ mod tests {
         assert_eq!(
             path.file_name().and_then(|name| name.to_str()),
             Some("stdlib.rulepack.json")
+        );
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn default_kernel_library_path_points_to_committed_kir() {
+        let path = super::default_kernel_library_path();
+
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("kerml-kernel.kir.json")
         );
         assert!(path.exists());
     }

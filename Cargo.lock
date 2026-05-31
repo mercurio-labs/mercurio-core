@@ -830,6 +830,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mercurio-kerml"
+version = "0.1.0"
+dependencies = [
+ "mercurio-core",
+]
+
+[[package]]
 name = "mercurio-kir"
 version = "0.1.0"
 dependencies = [
@@ -844,6 +851,13 @@ dependencies = [
  "mercurio-core",
  "pyo3",
  "serde_json",
+]
+
+[[package]]
+name = "mercurio-sysml"
+version = "0.1.0"
+dependencies = [
+ "mercurio-core",
 ]
 
 [[package]]

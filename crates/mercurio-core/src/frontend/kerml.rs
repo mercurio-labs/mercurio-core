@@ -11,8 +11,8 @@ use crate::frontend::resolver::{
 };
 use crate::frontend::transpile::{MappingBundle, transpile_module_with_source};
 use crate::ir::KirDocument;
+use crate::language::BaselineLibrary;
 use crate::logging::{compile_timer_start, log_compile_timed_event};
-use crate::paths::default_stdlib_path;
 
 #[derive(Debug)]
 pub enum KermlError {
@@ -52,8 +52,8 @@ impl From<crate::ir::KirError> for KermlError {
 }
 
 pub fn load_kerml_document(path: &Path) -> Result<KirDocument, KermlError> {
-    let stdlib = KirDocument::from_path(&default_stdlib_path())?;
-    load_kerml_document_with_stdlib(path, &stdlib)
+    let library_context = BaselineLibrary::Kernel.load()?;
+    load_kerml_document_with_stdlib(path, &library_context)
 }
 
 pub fn load_kerml_document_with_stdlib(

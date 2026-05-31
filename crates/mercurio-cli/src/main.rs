@@ -13,8 +13,8 @@ use mercurio_core::{
     KirDocument, KparPackageBuild, KparPackageSource, LibraryProviderConfig, LintReport,
     LintSeverity, LocalPackageManifest, LocalPackageRepository, LocalPackageSource,
     PROJECT_DESCRIPTOR_FILE_NAME, ProjectDescriptor, QueryEngine, QueryResultSet, Runtime,
-    SemanticCompileStatus, SourceLanguage, default_stdlib_path, discover_project_descriptor_path,
-    language_module, lint_text, parse_query, resolve_project_context, write_kpar_package,
+    SemanticCompileStatus, SourceLanguage, default_stdlib_path, lint_text, parse_query,
+    resolve_project_context_for_language, write_kpar_package,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -2161,38 +2161,23 @@ fn load_library_context(
         });
     }
 
-    if discover_project_descriptor_path(&open_path).is_none()
-        && let Some(language) = default_language
-    {
-        let baseline = language_module(language).default_baseline();
-        return baseline
-            .load()
-            .map(|document| LibraryContext {
-                document,
-                project_descriptor: ProjectDescriptorUsage::NotFound,
-            })
-            .map_err(|err| {
-                CliError::execution(format!(
-                    "failed to load default {} library context: {err}",
-                    language.as_str()
-                ))
-            });
-    }
-
-    resolve_project_context(&open_path)
-        .map(|context| LibraryContext {
-            document: context.library_context_document,
-            project_descriptor: context
-                .descriptor_path
-                .map(ProjectDescriptorUsage::Used)
-                .unwrap_or(ProjectDescriptorUsage::NotFound),
-        })
-        .map_err(|err| {
-            CliError::execution(format!(
-                "failed to load project context for {}: {err}",
-                open_path.display()
-            ))
-        })
+    resolve_project_context_for_language(
+        &open_path,
+        default_language.or(Some(SourceLanguage::Sysml)),
+    )
+    .map(|context| LibraryContext {
+        document: context.library_context_document,
+        project_descriptor: context
+            .descriptor_path
+            .map(ProjectDescriptorUsage::Used)
+            .unwrap_or(ProjectDescriptorUsage::NotFound),
+    })
+    .map_err(|err| {
+        CliError::execution(format!(
+            "failed to load project context for {}: {err}",
+            open_path.display()
+        ))
+    })
 }
 
 fn default_source_language_for_sources(sources: &[SourceInput]) -> Option<SourceLanguage> {

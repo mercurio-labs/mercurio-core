@@ -1,11 +1,11 @@
 use crate::frontend::ast::ParsedModule;
 use crate::frontend::diagnostics::Diagnostic;
-use crate::frontend::kerml::{compile_kerml_text_with_context, parse_kerml};
-use crate::frontend::sysml::{compile_sysml_text_with_context, parse_sysml};
 use crate::frontend::transpile::MappingBundle;
 use crate::ir::KirDocument;
 use crate::language::concepts::SourceLanguage;
+use crate::language::kerml::parser as kerml_parser;
 use crate::language::library_context::BaselineLibrary;
+use crate::language::sysml::parser as sysml_parser;
 
 pub trait LanguageModule: Sync {
     fn language(&self) -> SourceLanguage;
@@ -44,7 +44,7 @@ impl LanguageModule for KermlLanguageModule {
     }
 
     fn parse(&self, input: &str) -> Result<ParsedModule, Diagnostic> {
-        parse_kerml(input)
+        kerml_parser::parse(input)
     }
 
     fn compile_text_with_context(
@@ -54,7 +54,12 @@ impl LanguageModule for KermlLanguageModule {
         context_modules: &[ParsedModule],
         library_context: &KirDocument,
     ) -> Result<KirDocument, Diagnostic> {
-        compile_kerml_text_with_context(input, source_name, context_modules, library_context)
+        kerml_parser::compile_text_with_context(
+            input,
+            source_name,
+            context_modules,
+            library_context,
+        )
     }
 
     fn default_baseline(&self) -> BaselineLibrary {
@@ -71,7 +76,7 @@ impl LanguageModule for SysmlLanguageModule {
     }
 
     fn parse(&self, input: &str) -> Result<ParsedModule, Diagnostic> {
-        parse_sysml(input)
+        sysml_parser::parse(input)
     }
 
     fn compile_text_with_context(
@@ -81,7 +86,12 @@ impl LanguageModule for SysmlLanguageModule {
         context_modules: &[ParsedModule],
         library_context: &KirDocument,
     ) -> Result<KirDocument, Diagnostic> {
-        compile_sysml_text_with_context(input, source_name, context_modules, library_context)
+        sysml_parser::compile_text_with_context(
+            input,
+            source_name,
+            context_modules,
+            library_context,
+        )
     }
 
     fn default_baseline(&self) -> BaselineLibrary {

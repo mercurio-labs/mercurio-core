@@ -2,6 +2,8 @@
 members = [
     "crates/mercurio-kir",
     "crates/mercurio-core",
+    "crates/mercurio-kerml",
+    "crates/mercurio-sysml",
     "crates/mercurio-views",
     "crates/mercurio-cli",
     "crates/mercurio-python",

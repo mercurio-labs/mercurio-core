@@ -15,7 +15,7 @@ use crate::frontend::resolver::{
 use crate::frontend::transpile::{MappingBundle, transpile_module};
 use crate::ir::KirDocument;
 use crate::logging::{compile_timer_start, log_compile_timed_event};
-use crate::paths::default_stdlib_path;
+use crate::paths::default_sysml_library_path;
 
 #[derive(Debug)]
 pub enum SysmlError {
@@ -75,7 +75,7 @@ impl From<crate::ir::KirError> for SysmlError {
 }
 
 pub fn load_sysml_document(path: &Path) -> Result<KirDocument, SysmlError> {
-    let stdlib = KirDocument::from_path(&default_stdlib_path())?;
+    let stdlib = KirDocument::from_path(&default_sysml_library_path())?;
     load_sysml_document_with_stdlib(path, &stdlib)
 }
 

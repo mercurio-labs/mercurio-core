@@ -1,0 +1,8 @@
+{
+  "metadata": {
+    "library_id": "org.omg/kerml-kernel",
+    "library_version": "0.0.0-bootstrap",
+    "note": "Bootstrap KerML kernel baseline. This intentionally contains no elements until a generated Kernel/KerML library artifact is wired in."
+  },
+  "elements": []
+}

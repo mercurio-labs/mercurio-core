@@ -16,13 +16,7 @@ impl BaselineLibrary {
                 metadata: Default::default(),
                 elements: Vec::new(),
             }),
-            Self::Kernel => match default_kernel_library_path() {
-                Some(path) => KirDocument::from_path(&path),
-                None => Ok(KirDocument {
-                    metadata: Default::default(),
-                    elements: Vec::new(),
-                }),
-            },
+            Self::Kernel => KirDocument::from_path(&default_kernel_library_path()),
             Self::Sysml => KirDocument::from_path(&default_sysml_library_path()),
             Self::Custom(document) => Ok(document.clone()),
         }

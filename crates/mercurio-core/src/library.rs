@@ -7,10 +7,11 @@ use serde::{Deserialize, Serialize};
 use crate::ir::{KirDocument, KirError};
 use crate::paths::{
     bundled_package_repo_path, bundled_stdlib_package_set_path, default_package_kir_cache_path,
-    default_package_repo_path, default_stdlib_path, default_user_config_path,
+    default_package_repo_path, default_sysml_library_path, default_user_config_path,
 };
 
 pub const DEFAULT_STDLIB_LOCATOR: &str = "kpar:org.omg/sysml-stdlib:2.0.0";
+pub const DEFAULT_SYSML_LIBRARY_LOCATOR: &str = DEFAULT_STDLIB_LOCATOR;
 const DEFAULT_STDLIB_PACKAGE_SET_ENTRY: &str =
     "https://www.omg.org/spec/SysML/20250201/Systems-Library.kpar";
 const KPAR_PRECOMPILED_KIR_ENTRY: &str = "document.kir.json";
@@ -158,12 +159,16 @@ pub struct KparLocator {
 
 impl Default for BaselineLibraryConfig {
     fn default() -> Self {
-        Self::bundled_stdlib()
+        Self::bundled_sysml_library()
     }
 }
 
 impl BaselineLibraryConfig {
     pub fn bundled_stdlib() -> Self {
+        Self::bundled_sysml_library()
+    }
+
+    pub fn bundled_sysml_library() -> Self {
         Self {
             id: "stdlib".to_string(),
             provider: LibraryProviderConfig::BundledStdlib,
@@ -171,10 +176,14 @@ impl BaselineLibraryConfig {
     }
 
     pub fn stdlib_locator() -> Self {
+        Self::sysml_library_locator()
+    }
+
+    pub fn sysml_library_locator() -> Self {
         Self {
             id: "stdlib".to_string(),
             provider: LibraryProviderConfig::KparLocator {
-                locator: DEFAULT_STDLIB_LOCATOR.to_string(),
+                locator: DEFAULT_SYSML_LIBRARY_LOCATOR.to_string(),
             },
         }
     }
@@ -213,7 +222,7 @@ impl LibraryProviderConfig {
                 let source_path = fingerprint
                     .source_path
                     .clone()
-                    .unwrap_or_else(default_stdlib_path);
+                    .unwrap_or_else(default_sysml_library_path);
                 let document = KirDocument::from_path(&source_path)?;
 
                 Ok(ResolvedLibraryArtifact {
@@ -246,7 +255,7 @@ impl LibraryProviderConfig {
                     .source_path
                     .clone()
                     .unwrap_or_else(|| resolve_provider_path(path, base_dir));
-                let fallback_context = KirDocument::from_path(&default_stdlib_path())?;
+                let fallback_context = KirDocument::from_path(&default_sysml_library_path())?;
                 let context_document = library_context.unwrap_or(&fallback_context);
                 let document = compile_sysml_directory(&source_path, context_document)?;
 
@@ -264,7 +273,7 @@ impl LibraryProviderConfig {
                     .source_path
                     .clone()
                     .unwrap_or_else(|| resolve_provider_path(path, base_dir));
-                let fallback_context = KirDocument::from_path(&default_stdlib_path())?;
+                let fallback_context = KirDocument::from_path(&default_sysml_library_path())?;
                 let context_document = library_context.unwrap_or(&fallback_context);
                 let (document, package_metadata) =
                     compile_kpar_file(&source_path, context_document)?;
@@ -304,7 +313,8 @@ impl LibraryProviderConfig {
 
                 for repo in LocalPackageRepository::resolution_repositories() {
                     if let Some(source_path) = repo.find_package(name, version)? {
-                        let fallback_context = KirDocument::from_path(&default_stdlib_path())?;
+                        let fallback_context =
+                            KirDocument::from_path(&default_sysml_library_path())?;
                         let context_document = library_context.unwrap_or(&fallback_context);
                         let source_digest = digest_file(&source_path)?;
                         let (document, package_metadata) = PackageKirCache::default_user()
@@ -355,7 +365,7 @@ impl LibraryProviderConfig {
                     .source_path
                     .clone()
                     .unwrap_or_else(|| resolve_provider_path(path, base_dir));
-                let fallback_context = KirDocument::from_path(&default_stdlib_path())?;
+                let fallback_context = KirDocument::from_path(&default_sysml_library_path())?;
                 let context_document = library_context.unwrap_or(&fallback_context);
                 let (document, package_metadata) =
                     compile_kpar_package_set(&source_path, entry, context_document)?;
@@ -382,7 +392,7 @@ impl LibraryProviderConfig {
         let importer_version = env!("CARGO_PKG_VERSION").to_string();
         match self {
             Self::BundledStdlib => {
-                let source_path = default_stdlib_path();
+                let source_path = default_sysml_library_path();
                 Ok(LibrarySourceFingerprint {
                     library_id: library_id.to_string(),
                     source_kind: "bundled_stdlib".to_string(),
