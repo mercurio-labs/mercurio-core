@@ -67,7 +67,7 @@ pub fn load_kerml_document_with_stdlib(
 pub fn compile_kerml_text(
     input: &str,
     source_name: &str,
-    stdlib: &KirDocument,
+    library_context: &KirDocument,
 ) -> Result<KirDocument, Diagnostic> {
     let parse_start = compile_timer_start();
     let module = parse_kerml(input)?;
@@ -77,14 +77,28 @@ pub fn compile_kerml_text(
         "ok",
         format!("source={} bytes={}", source_name, input.len()),
     );
-    compile_kerml_module(&module, source_name, stdlib)
+    compile_kerml_module(&module, source_name, library_context)
+}
+
+pub fn compile_kerml_text_with_empty_context(
+    input: &str,
+    source_name: &str,
+) -> Result<KirDocument, Diagnostic> {
+    compile_kerml_text(
+        input,
+        source_name,
+        &KirDocument {
+            metadata: Default::default(),
+            elements: Vec::new(),
+        },
+    )
 }
 
 pub fn compile_kerml_text_with_context(
     input: &str,
     source_name: &str,
     context_modules: &[SysmlModule],
-    stdlib: &KirDocument,
+    library_context: &KirDocument,
 ) -> Result<KirDocument, Diagnostic> {
     let parse_start = compile_timer_start();
     let module = parse_kerml(input)?;
@@ -94,13 +108,13 @@ pub fn compile_kerml_text_with_context(
         "ok",
         format!("source={} bytes={}", source_name, input.len()),
     );
-    compile_kerml_module_with_context(&module, source_name, context_modules, stdlib)
+    compile_kerml_module_with_context(&module, source_name, context_modules, library_context)
 }
 
 pub fn compile_kerml_module(
     module: &SysmlModule,
     source_name: &str,
-    stdlib: &KirDocument,
+    library_context: &KirDocument,
 ) -> Result<KirDocument, Diagnostic> {
     let mapping_start = compile_timer_start();
     let mappings = MappingBundle::load()?;
@@ -112,8 +126,12 @@ pub fn compile_kerml_module(
     );
 
     let resolve_start = compile_timer_start();
-    let resolved =
-        resolve_kerml_module_with_context(module, std::slice::from_ref(module), stdlib, mappings)?;
+    let resolved = resolve_kerml_module_with_context(
+        module,
+        std::slice::from_ref(module),
+        library_context,
+        mappings,
+    )?;
     log_compile_timed_event(
         "kerml.compile.resolve",
         resolve_start,
@@ -140,7 +158,7 @@ pub fn compile_kerml_module_with_context(
     module: &SysmlModule,
     source_name: &str,
     context_modules: &[SysmlModule],
-    stdlib: &KirDocument,
+    library_context: &KirDocument,
 ) -> Result<KirDocument, Diagnostic> {
     let mapping_start = compile_timer_start();
     let mappings = MappingBundle::load()?;
@@ -152,7 +170,8 @@ pub fn compile_kerml_module_with_context(
     );
 
     let resolve_start = compile_timer_start();
-    let resolved = resolve_kerml_module_with_context(module, context_modules, stdlib, mappings)?;
+    let resolved =
+        resolve_kerml_module_with_context(module, context_modules, library_context, mappings)?;
     log_compile_timed_event(
         "kerml.compile.resolve",
         resolve_start,
@@ -1324,11 +1343,7 @@ mod tests {
 
     #[test]
     fn compiles_minimal_classifier_and_feature_to_kir() {
-        let stdlib = KirDocument {
-            metadata: Default::default(),
-            elements: Vec::new(),
-        };
-        let document = compile_kerml_text(
+        let document = compile_kerml_text_with_empty_context(
             "package Demo {
                 classifier Vehicle {
                     feature engine : Engine;
@@ -1336,7 +1351,6 @@ mod tests {
                 classifier Engine;
             }",
             "inline.kerml",
-            &stdlib,
         )
         .unwrap();
 

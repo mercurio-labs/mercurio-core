@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -12,36 +11,7 @@ use crate::frontend::diagnostics::Diagnostic;
 use crate::frontend::kerml::{compile_kerml_module_with_context, parse_kerml};
 use crate::frontend::sysml::{compile_sysml_module_with_context_report, parse_sysml_recovering};
 use crate::ir::KirDocument;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SourceLanguage {
-    Sysml,
-    Kerml,
-}
-
-impl SourceLanguage {
-    pub fn from_path(path: &Path) -> Option<Self> {
-        match path.extension().and_then(|extension| extension.to_str()) {
-            Some(extension) if extension.eq_ignore_ascii_case("sysml") => Some(Self::Sysml),
-            Some(extension) if extension.eq_ignore_ascii_case("kerml") => Some(Self::Kerml),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Sysml => "sysml",
-            Self::Kerml => "kerml",
-        }
-    }
-}
-
-impl fmt::Display for SourceLanguage {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
+use crate::language::SourceLanguage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -522,6 +492,8 @@ fn warning(
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
     use crate::KirDocument;
     use crate::paths::default_stdlib_path;

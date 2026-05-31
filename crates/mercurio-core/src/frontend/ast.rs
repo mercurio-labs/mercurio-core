@@ -199,9 +199,11 @@ pub struct PackageDecl {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct SysmlModule {
+pub struct ParsedModule {
     pub package: Option<PackageDecl>,
     pub members: Vec<Declaration>,
     pub imports: Vec<ImportDecl>,
     pub definitions: Vec<PartDefinitionDecl>,
 }
+
+pub type SysmlModule = ParsedModule;

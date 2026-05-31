@@ -83,10 +83,12 @@ pub use feasibility::{
     SemanticCapabilityOracle, workspace_revision_for_project,
 };
 pub use frontend::format::{FormatError, format_path_text, format_sysml_text, format_text};
-pub use frontend::kerml::{KermlError, compile_kerml_text, load_kerml_document, parse_kerml};
+pub use frontend::kerml::{
+    KermlError, compile_kerml_text, compile_kerml_text_with_empty_context, load_kerml_document,
+    parse_kerml,
+};
 pub use frontend::lint::{
-    LintDiagnostic, LintReport, LintSeverity, SourceLanguage, lint_kerml_text, lint_sysml_text,
-    lint_text,
+    LintDiagnostic, LintReport, LintSeverity, lint_kerml_text, lint_sysml_text, lint_text,
 };
 pub use frontend::pilot::{
     PilotDocumentationBlock, PilotExportDocument, PilotExportElement, PilotExportRelationship,
@@ -112,9 +114,11 @@ pub use ir::{
     KirFieldSpec, load_model_stack,
 };
 pub use language::{
-    CURRENT_DEFAULT_PROFILE_ID, LanguageProfile, LanguageProfileError, MetamodelConceptRegistry,
-    SemanticConcept, SourceLanguage as ProfileSourceLanguage, default_language_profile,
-    default_metamodel_registry, load_language_profile,
+    BaselineLibrary, CURRENT_DEFAULT_PROFILE_ID, KermlLanguageModule, LanguageModule,
+    LanguageProfile, LanguageProfileError, LibraryContext, MetamodelConceptRegistry,
+    SemanticConcept, SourceLanguage, SysmlLanguageModule, default_language_profile,
+    default_metamodel_registry, language_module, language_module_for_path, language_modules,
+    load_language_profile,
 };
 pub use library::{
     BaselineLibraryConfig, KparLocator, KparPackageBuild, KparPackageSource, LibraryCacheMetadata,
@@ -204,6 +208,11 @@ pub use semantic_target::{
 pub use session::{
     CommitMode, CommitResult, CommitStrategy, ForkElement, KirOverlay, ModelFork, ModelSession,
     ModelWorkspace, SessionError, WorkspaceSnapshot,
+};
+pub use source_set::{
+    SourceCompileContext, SourceDocument, collect_context_modules,
+    compile_source_document_with_context, compile_source_documents, compile_source_text,
+    compile_source_text_with_context, parse_source_module, parse_source_text,
 };
 pub use syntax_compare::{
     SyntaxComparisonReport, SyntaxNodeMismatch, SyntaxSnapshot, SyntaxSnapshotNode,

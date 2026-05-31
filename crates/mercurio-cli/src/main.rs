@@ -6,8 +6,8 @@ use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use mercurio_core::frontend::ast::{Declaration, SysmlModule};
 use mercurio_core::frontend::diagnostics::Diagnostic;
-use mercurio_core::frontend::kerml::{compile_kerml_text, parse_kerml};
-use mercurio_core::frontend::sysml::{compile_sysml_text_with_context_report, parse_sysml};
+use mercurio_core::frontend::kerml::compile_kerml_text;
+use mercurio_core::frontend::sysml::compile_sysml_text_with_context_report;
 use mercurio_core::plugin_registry as registry;
 use mercurio_core::{
     KirDocument, KparPackageBuild, KparPackageSource, LibraryProviderConfig, LintReport,
@@ -2006,10 +2006,7 @@ fn extend_context_values(
 }
 
 fn parse_source(source: &SourceInput) -> Result<SysmlModule, Diagnostic> {
-    match source.language {
-        SourceLanguage::Sysml => parse_sysml(&source.content),
-        SourceLanguage::Kerml => parse_kerml(&source.content),
-    }
+    mercurio_core::source_set::parse_source_text(source.language, &source.content)
 }
 
 fn compile_source(source: &SourceInput, stdlib: &KirDocument) -> CompileResponse {
@@ -4558,7 +4555,7 @@ mod tests {
 
         let sample = std::fs::read_to_string(sample_path).unwrap();
         assert!(sample.contains("package Demo_Project"));
-        parse_sysml(&sample).unwrap();
+        mercurio_core::frontend::sysml::parse_sysml(&sample).unwrap();
     }
 
     #[test]

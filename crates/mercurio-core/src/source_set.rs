@@ -1,16 +1,13 @@
 use std::path::Path;
 
-use crate::frontend::ast::SysmlModule;
+use crate::frontend::ast::{ParsedModule, SysmlModule};
 use crate::frontend::diagnostics::Diagnostic;
-use crate::frontend::kerml::{
-    compile_kerml_module_with_resolver_context, compile_kerml_text_with_context, parse_kerml,
-};
+use crate::frontend::kerml::compile_kerml_module_with_resolver_context;
 use crate::frontend::resolver::ResolverContext;
-use crate::frontend::sysml::{
-    compile_sysml_module_with_resolver_context, compile_sysml_text_with_context, parse_sysml,
-};
+use crate::frontend::sysml::compile_sysml_module_with_resolver_context;
 use crate::frontend::transpile::MappingBundle;
 use crate::ir::{KirDocument, KirError};
+use crate::language::{SourceLanguage, language_module};
 use crate::logging::compile_timer_start;
 use crate::logging::log_compile_timed_event;
 
@@ -67,12 +64,31 @@ impl SourceDocument {
     }
 }
 
-pub fn parse_source_module(path: &str, content: &str) -> Result<SysmlModule, Diagnostic> {
-    if is_kerml_path(path) {
-        parse_kerml(content)
-    } else {
-        parse_sysml(content)
-    }
+pub fn parse_source_module(path: &str, content: &str) -> Result<ParsedModule, Diagnostic> {
+    let language = SourceLanguage::from_path(Path::new(path)).unwrap_or(SourceLanguage::Sysml);
+    parse_source_text(language, content)
+}
+
+pub fn parse_source_text(
+    language: SourceLanguage,
+    content: &str,
+) -> Result<ParsedModule, Diagnostic> {
+    language_module(language).parse(content)
+}
+
+pub fn compile_source_text(
+    language: SourceLanguage,
+    source_name: &str,
+    content: &str,
+    context_modules: &[ParsedModule],
+    library_context: &KirDocument,
+) -> Result<KirDocument, Diagnostic> {
+    language_module(language).compile_text_with_context(
+        content,
+        source_name,
+        context_modules,
+        library_context,
+    )
 }
 
 pub fn compile_source_text_with_context(
@@ -81,11 +97,8 @@ pub fn compile_source_text_with_context(
     context_modules: &[SysmlModule],
     library_context: &KirDocument,
 ) -> Result<KirDocument, Diagnostic> {
-    if is_kerml_path(path) {
-        compile_kerml_text_with_context(content, path, context_modules, library_context)
-    } else {
-        compile_sysml_text_with_context(content, path, context_modules, library_context)
-    }
+    let language = SourceLanguage::from_path(Path::new(path)).unwrap_or(SourceLanguage::Sysml);
+    compile_source_text(language, path, content, context_modules, library_context)
 }
 
 pub fn compile_source_document_with_context(

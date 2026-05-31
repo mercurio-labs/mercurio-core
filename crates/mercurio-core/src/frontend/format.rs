@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::frontend::lint::SourceLanguage;
+use crate::language::SourceLanguage;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FormatError {

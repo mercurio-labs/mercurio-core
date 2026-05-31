@@ -189,7 +189,7 @@ struct ImportAliases {
 }
 
 #[derive(Debug, Clone)]
-struct StdlibIndexes {
+struct LibraryIndexes {
     ids: Vec<String>,
     feature_index: BTreeMap<String, BTreeMap<String, String>>,
     aliases: BTreeMap<String, String>,
@@ -204,7 +204,7 @@ pub struct ResolverContext {
     definition_index: BTreeMap<String, CollectedDefinition>,
     local_feature_index: BTreeMap<String, BTreeMap<String, String>>,
     local_usage_map: BTreeMap<String, CollectedUsage>,
-    stdlib_indexes: Arc<StdlibIndexes>,
+    library_indexes: Arc<LibraryIndexes>,
 }
 
 impl ResolverContext {
@@ -214,7 +214,7 @@ impl ResolverContext {
 
     pub fn from_modules(
         context_modules: &[SysmlModule],
-        stdlib: &KirDocument,
+        library_context: &KirDocument,
         mappings: &MappingBundle,
     ) -> Result<Self, Diagnostic> {
         let collect_context_start = compile_timer_start();
@@ -249,15 +249,15 @@ impl ResolverContext {
         );
 
         let stdlib_index_start = compile_timer_start();
-        let stdlib_indexes = cached_stdlib_indexes(stdlib, mappings);
+        let library_indexes = cached_library_indexes(library_context, mappings);
         log_compile_timed_event(
-            "resolver.build_stdlib_indexes",
+            "resolver.build_library_indexes",
             stdlib_index_start,
             "ok",
             format!(
-                "stdlib_elements={} aliases={} cache=instance_keyed",
-                stdlib.elements.len(),
-                stdlib_indexes.aliases.len()
+                "library_elements={} aliases={} cache=instance_keyed",
+                library_context.elements.len(),
+                library_indexes.aliases.len()
             ),
         );
 
@@ -269,7 +269,7 @@ impl ResolverContext {
             definition_index,
             local_feature_index,
             local_usage_map,
-            stdlib_indexes,
+            library_indexes,
         })
     }
 }
@@ -289,22 +289,27 @@ const KERML_RESOLVE_POLICY: ResolvePolicy = ResolvePolicy {
 
 pub fn resolve_module(
     module: &SysmlModule,
-    stdlib: &KirDocument,
+    library_context: &KirDocument,
     mappings: &MappingBundle,
 ) -> Result<ResolvedModule, Diagnostic> {
-    resolve_module_with_context(module, std::slice::from_ref(module), stdlib, mappings)
+    resolve_module_with_context(
+        module,
+        std::slice::from_ref(module),
+        library_context,
+        mappings,
+    )
 }
 
 pub fn resolve_module_with_context(
     module: &SysmlModule,
     context_modules: &[SysmlModule],
-    stdlib: &KirDocument,
+    library_context: &KirDocument,
     mappings: &MappingBundle,
 ) -> Result<ResolvedModule, Diagnostic> {
     resolve_module_with_policy(
         module,
         context_modules,
-        stdlib,
+        library_context,
         mappings,
         STRICT_RESOLVE_POLICY,
     )
@@ -321,13 +326,13 @@ pub(crate) fn resolve_module_with_resolver_context(
 pub fn resolve_kerml_module_with_context(
     module: &SysmlModule,
     context_modules: &[SysmlModule],
-    stdlib: &KirDocument,
+    library_context: &KirDocument,
     mappings: &MappingBundle,
 ) -> Result<ResolvedModule, Diagnostic> {
     resolve_module_with_policy(
         module,
         context_modules,
-        stdlib,
+        library_context,
         mappings,
         KERML_RESOLVE_POLICY,
     )
@@ -344,11 +349,11 @@ pub(crate) fn resolve_kerml_module_with_resolver_context(
 fn resolve_module_with_policy(
     module: &SysmlModule,
     context_modules: &[SysmlModule],
-    stdlib: &KirDocument,
+    library_context: &KirDocument,
     mappings: &MappingBundle,
     policy: ResolvePolicy,
 ) -> Result<ResolvedModule, Diagnostic> {
-    let context = ResolverContext::from_modules(context_modules, stdlib, mappings)?;
+    let context = ResolverContext::from_modules(context_modules, library_context, mappings)?;
     resolve_module_with_policy_context(module, &context, mappings, policy)
 }
 
@@ -379,8 +384,8 @@ fn resolve_module_with_policy_context(
     let resolve_import_start = compile_timer_start();
     let resolved_imports = resolve_imports(
         &imports,
-        &context.stdlib_indexes.ids,
-        &context.stdlib_indexes.aliases,
+        &context.library_indexes.ids,
+        &context.library_indexes.aliases,
         &context.local_definitions,
         &local_aliases,
     )?;
@@ -397,8 +402,8 @@ fn resolve_module_with_policy_context(
         &context.packages,
         &context.definitions,
         &context.local_usage_map,
-        &context.stdlib_indexes.ids,
-        &context.stdlib_indexes.aliases,
+        &context.library_indexes.ids,
+        &context.library_indexes.aliases,
         policy,
     )?;
     log_compile_timed_event(
@@ -420,9 +425,9 @@ fn resolve_module_with_policy_context(
         .map(|definition| {
             resolve_definition(
                 definition,
-                &context.stdlib_indexes.ids,
-                &context.stdlib_indexes.feature_index,
-                &context.stdlib_indexes.aliases,
+                &context.library_indexes.ids,
+                &context.library_indexes.feature_index,
+                &context.library_indexes.aliases,
                 &context.local_definitions,
                 &local_aliases,
                 &import_aliases,
@@ -446,9 +451,9 @@ fn resolve_module_with_policy_context(
         .map(|usage| {
             resolve_usage(
                 usage,
-                &context.stdlib_indexes.ids,
-                &context.stdlib_indexes.feature_index,
-                &context.stdlib_indexes.aliases,
+                &context.library_indexes.ids,
+                &context.library_indexes.feature_index,
+                &context.library_indexes.aliases,
                 &context.local_definitions,
                 &local_aliases,
                 &import_aliases,
@@ -1322,11 +1327,14 @@ fn build_stdlib_feature_index(
     resolved
 }
 
-fn cached_stdlib_indexes(stdlib: &KirDocument, mappings: &MappingBundle) -> Arc<StdlibIndexes> {
-    static CACHE: OnceLock<Mutex<BTreeMap<(usize, usize, u64), Arc<StdlibIndexes>>>> =
+fn cached_library_indexes(
+    library_context: &KirDocument,
+    mappings: &MappingBundle,
+) -> Arc<LibraryIndexes> {
+    static CACHE: OnceLock<Mutex<BTreeMap<(usize, usize, u64), Arc<LibraryIndexes>>>> =
         OnceLock::new();
 
-    let key = stdlib_instance_key(stdlib);
+    let key = library_context_instance_key(library_context);
     let cache = CACHE.get_or_init(|| Mutex::new(BTreeMap::new()));
     {
         let guard = cache
@@ -1337,14 +1345,14 @@ fn cached_stdlib_indexes(stdlib: &KirDocument, mappings: &MappingBundle) -> Arc<
         }
     }
 
-    let indexes = Arc::new(StdlibIndexes {
-        ids: stdlib
+    let indexes = Arc::new(LibraryIndexes {
+        ids: library_context
             .elements
             .iter()
             .map(|element| element.id.clone())
             .collect::<Vec<_>>(),
-        feature_index: build_stdlib_feature_index(stdlib, mappings),
-        aliases: build_stdlib_alias_map(stdlib, mappings),
+        feature_index: build_stdlib_feature_index(library_context, mappings),
+        aliases: build_stdlib_alias_map(library_context, mappings),
     });
 
     let mut guard = cache
@@ -1353,14 +1361,14 @@ fn cached_stdlib_indexes(stdlib: &KirDocument, mappings: &MappingBundle) -> Arc<
     guard.entry(key).or_insert_with(|| indexes.clone()).clone()
 }
 
-fn stdlib_instance_key(stdlib: &KirDocument) -> (usize, usize, u64) {
+fn library_context_instance_key(library_context: &KirDocument) -> (usize, usize, u64) {
     let mut hasher = DefaultHasher::new();
-    for element in &stdlib.elements {
+    for element in &library_context.elements {
         element.id.hash(&mut hasher);
     }
     (
-        stdlib.elements.as_ptr() as usize,
-        stdlib.elements.len(),
+        library_context.elements.as_ptr() as usize,
+        library_context.elements.len(),
         hasher.finish(),
     )
 }

@@ -14,6 +14,7 @@ use crate::frontend::resolver::{
     ResolvedPathSegment, ResolvedUsage,
 };
 use crate::ir::{KirDocument, KirElement};
+use crate::language::SourceLanguage;
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Deserialize)]
 pub struct PilotConstructSeed {
@@ -123,6 +124,14 @@ impl MappingBundle {
             Ok(bundle) => Ok(bundle),
             Err(message) => Err(Diagnostic::new(message.clone(), None)),
         }
+    }
+
+    pub fn load_for_language(_language: SourceLanguage) -> Result<&'static Self, Diagnostic> {
+        Self::load()
+    }
+
+    pub fn load_for_profile(_profile_id: &str) -> Result<&'static Self, Diagnostic> {
+        Self::load()
     }
 
     fn load_uncached() -> Result<Self, Diagnostic> {
