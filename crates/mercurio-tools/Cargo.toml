@@ -56,6 +56,10 @@ path = "src/bin/audit_language_profile.rs"
 name = "verify_core_contracts"
 path = "src/bin/verify_core_contracts.rs"
 
+[[bin]]
+name = "generate_kernel_baseline"
+path = "src/bin/generate_kernel_baseline.rs"
+
 [dependencies]
 mercurio-core = { path = "../mercurio-core" }
 mercurio-views = { path = "../mercurio-views" }

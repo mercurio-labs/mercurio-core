@@ -21,6 +21,10 @@ pub fn default_stdlib_path() -> PathBuf {
 }
 
 pub fn default_sysml_library_path() -> PathBuf {
+    if let Ok(path) = std::env::var("MERCURIO_SYSML_LIBRARY_PATH") {
+        return PathBuf::from(path);
+    }
+
     if let Ok(path) = std::env::var("MERCURIO_STDLIB_PATH") {
         return PathBuf::from(path);
     }
@@ -33,6 +37,10 @@ pub fn default_stdlib_rulepack_path() -> PathBuf {
 }
 
 pub fn default_sysml_rulepack_path() -> PathBuf {
+    if let Ok(path) = std::env::var("MERCURIO_SYSML_RULEPACK_PATH") {
+        return PathBuf::from(path);
+    }
+
     if let Ok(path) = std::env::var("MERCURIO_STDLIB_RULEPACK_PATH") {
         return PathBuf::from(path);
     }
